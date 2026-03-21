@@ -7,11 +7,11 @@ import { Pane } from 'tweakpane'
 
 const SEGMENTS_PER_TURN = 12
 const DAYS_PER_YEAR = 365
-const DAY_SEGS_PER_TURN = 12
+const DAY_SEGS_PER_TURN = 32
 const HOURS_PER_DAY = 24
-const HOUR_SEGS_PER_TURN = 8
+const HOUR_SEGS_PER_TURN = 16
 const MINS_PER_HOUR = 60
-const MIN_SEGS_PER_TURN = 8
+const MIN_SEGS_PER_TURN = 16
 const SECS_PER_MIN = 60
 const SEC_SEGS_PER_TURN = 32
 const SEC_WINDOW = 120 // ±60 seconds shown
@@ -62,6 +62,25 @@ class HelixCurve extends THREE.Curve<THREE.Vector3> {
   }
 }
 
+// Catmull-Rom interpolation: sample a smooth curve through piecewise-linear stored positions.
+function sampleSmooth(
+  src: Float32Array, totalSegs: number,
+  t: number, out: Float32Array, j: number,
+) {
+  const fi = t * totalSegs
+  const i1 = Math.min(Math.floor(fi), totalSegs)
+  const i0 = Math.max(i1 - 1, 0)
+  const i2 = Math.min(i1 + 1, totalSegs)
+  const i3 = Math.min(i1 + 2, totalSegs)
+  const f = fi - i1
+  const f2 = f * f, f3 = f2 * f
+  const a0 = i0 * 3, a1 = i1 * 3, a2 = i2 * 3, a3 = i3 * 3
+  for (let k = 0; k < 3; k++) {
+    const p0 = src[a0 + k], p1 = src[a1 + k], p2 = src[a2 + k], p3 = src[a3 + k]
+    out[j + k] = 0.5 * ((2 * p1) + (-p0 + p2) * f + (2 * p0 - 5 * p1 + 4 * p2 - p3) * f2 + (-p0 + 3 * p1 - 3 * p2 + p3) * f3)
+  }
+}
+
 // Writes a day-coil position into arr[j..j+2] using the analytical helix Frenet frame.
 function writeDayPos(
   t: number, omega: number, R: number, L: number, tMag: number,
@@ -95,6 +114,8 @@ interface Runtime {
   hourCoilLine: THREE.Line | null
   minCoilLine: THREE.Line | null
   secCoilLine: THREE.Line | null
+  hourPosData: Float32Array | null
+  totalHourSegs: number
   minPosData: Float32Array | null
   totalMinSegs: number
   material: MeshStandardNodeMaterial
@@ -317,57 +338,22 @@ export default function Scene() {
       rt.hourCoilLine = new THREE.Line(hourGeom, rt.lineMaterial)
       rt.scene.add(rt.hourCoilLine)
 
+      // Store for minute coil to sample from
+      rt.hourPosData = hourPos
+      rt.totalHourSegs = totalHourSegs
+
       // ====== MINUTE COIL (line) ======
       const totalMinTurns = totalHourTurns * MINS_PER_HOUR
       const totalMinSegs = totalMinTurns * MIN_SEGS_PER_TURN
       const totalMinPts = totalMinSegs + 1
 
-      // Pass 1: hour-coil positions at minute resolution
-      // We need to recompute the full chain (helix → day → hour) at minute resolution.
-      // Day positions at minute resolution:
-      const dayMR = new Float32Array(totalMinPts * 3)
-      for (let i = 0; i < totalMinPts; i++) {
-        writeDayPos(i / totalMinSegs, omega, R, L, tMag, totalDayTurns, dayOff, dayMR, i * 3)
-      }
-
-      // Hour positions at minute resolution (parallel transport on day path):
+      // Sample the ACTUAL stored hour coil positions at minute resolution (Catmull-Rom)
       const hourMR = new Float32Array(totalMinPts * 3)
-
-      curTan.set(dayMR[3] - dayMR[0], dayMR[4] - dayMR[1], dayMR[5] - dayMR[2]).normalize()
-      const ref2 = Math.abs(curTan.y) < 0.99 ? new THREE.Vector3(0, 1, 0) : new THREE.Vector3(1, 0, 0)
-      dN.crossVectors(ref2, curTan).normalize()
-      dB.crossVectors(curTan, dN)
-      prevTan.copy(curTan)
-
-      hourMR[0] = dayMR[0] + hOff * dN.x
-      hourMR[1] = dayMR[1] + hOff * dN.y
-      hourMR[2] = dayMR[2] + hOff * dN.z
-
-      for (let i = 1; i < totalMinPts; i++) {
-        const t = i / totalMinSegs
-        const pi = Math.max(0, i - 1) * 3
-        const ni = Math.min(totalMinPts - 1, i + 1) * 3
-        curTan.set(dayMR[ni] - dayMR[pi], dayMR[ni + 1] - dayMR[pi + 1], dayMR[ni + 2] - dayMR[pi + 2]).normalize()
-
-        crossV.crossVectors(prevTan, curTan)
-        const cl2 = crossV.length()
-        if (cl2 > 1e-10) {
-          crossV.divideScalar(cl2)
-          const ang2 = Math.acos(THREE.MathUtils.clamp(prevTan.dot(curTan), -1, 1))
-          dN.applyMatrix4(rotMat.makeRotationAxis(crossV, ang2))
-        }
-        dB.crossVectors(curTan, dN)
-        prevTan.copy(curTan)
-
-        const hA2 = t * totalHourTurns * Math.PI * 2
-        const cH2 = Math.cos(hA2), sH2 = Math.sin(hA2)
-        const j = i * 3
-        hourMR[j]     = dayMR[j]     + hOff * (cH2 * dN.x + sH2 * dB.x)
-        hourMR[j + 1] = dayMR[j + 1] + hOff * (cH2 * dN.y + sH2 * dB.y)
-        hourMR[j + 2] = dayMR[j + 2] + hOff * (cH2 * dN.z + sH2 * dB.z)
+      for (let i = 0; i < totalMinPts; i++) {
+        sampleSmooth(hourPos, totalHourSegs, i / totalMinSegs, hourMR, i * 3)
       }
 
-      // Pass 2: parallel-transport frame along hour-coil path + minute offsets
+      // Parallel-transport frame along hour-coil path + minute offsets
       const minPos = new Float32Array(totalMinPts * 3)
       const minCol = new Float32Array(totalMinPts * 3)
       const mOff = params.minOffset
@@ -455,22 +441,11 @@ export default function Scene() {
       const crossV = new THREE.Vector3()
       const rotMat = new THREE.Matrix4()
 
-      // Sample the ACTUAL stored minute coil positions at second resolution
-      // by linearly interpolating from rt.minPosData
+      // Sample the ACTUAL stored minute coil positions at second resolution (Catmull-Rom)
       const minSR = new Float32Array(totalSecPts * 3)
-      const mp = rt.minPosData
-      const mSegs = rt.totalMinSegs
-
       for (let i = 0; i < totalSecPts; i++) {
         const t = tS + tR * i / (totalSecPts - 1)
-        const fi = t * mSegs // floating index into minPos
-        const i0 = Math.min(Math.floor(fi), mSegs)
-        const i1 = Math.min(i0 + 1, mSegs)
-        const frac = fi - i0
-        const a = i0 * 3, b = i1 * 3, j = i * 3
-        minSR[j]     = mp[a]     + frac * (mp[b]     - mp[a])
-        minSR[j + 1] = mp[a + 1] + frac * (mp[b + 1] - mp[a + 1])
-        minSR[j + 2] = mp[a + 2] + frac * (mp[b + 2] - mp[a + 2])
+        sampleSmooth(rt.minPosData, rt.totalMinSegs, t, minSR, i * 3)
       }
 
       // Parallel transport on the sampled minute positions → wrap seconds
@@ -585,6 +560,7 @@ export default function Scene() {
       const rt: Runtime = {
         renderer, scene, camera, controls,
         coilMesh: null, dayCoilLine: null, hourCoilLine: null, minCoilLine: null, secCoilLine: null,
+        hourPosData: null, totalHourSegs: 0,
         minPosData: null, totalMinSegs: 0,
         material, lineMaterial, pane,
       }
@@ -617,7 +593,6 @@ export default function Scene() {
         const totalSecs = numTurns * DAYS_PER_YEAR * HOURS_PER_DAY * MINS_PER_HOUR * SECS_PER_MIN
         const sensitivity = params.panSpeed / totalSecs
         params.focusT = THREE.MathUtils.clamp(dragStartT - dx * sensitivity, 0, 1)
-        focusBinding.refresh()
         updateFocus(rt)
       })
       const stopDrag = () => { dragging = false; focusDragging = false }
