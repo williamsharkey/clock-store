@@ -77,8 +77,7 @@ function createCoilCompute(
     const idx = instanceIndex
     const t = tBaseU.add(tStepU.mul(idx.toFloat()))
 
-    // Century helix: use baseFrac[0] for precise theta
-    // turnsPerVertex_0 = tStep * totalTurns[0] (small, f32-safe)
+    // Century helix theta from baseFrac (f64-precise base + linear f32 offset)
     const helixFrac = baseFracUniforms[0].add(tStepU.mul(float(totalTurns[0])).mul(idx.toFloat()))
     const theta = fract(helixFrac).mul(float(TAU))
     const cT = cos(theta), sT = sin(theta)
@@ -95,51 +94,29 @@ function createCoilCompute(
     const by = radiusU.negate().mul(omegaU).div(tmagU).toVar('by')
     const bz = lengthU.mul(cT).div(tmagU).toVar('bz')
 
-    // Un-normalized tangent (accumulated through levels for Gram-Schmidt)
-    const dtx = radiusU.negate().mul(omegaU).mul(sT).toVar('dtx')
-    const dty = lengthU.toVar('dty')
-    const dtz = radiusU.mul(omegaU).mul(cT).toVar('dtz')
-
     for (let lvl = 1; lvl <= maxLevel; lvl++) {
+      // baseFrac[k] computed in f64 on CPU + linear per-vertex offset (no intermediate fract discontinuities)
       const lvlFrac = baseFracUniforms[lvl].add(tStepU.mul(float(totalTurns[lvl])).mul(idx.toFloat()))
       const alpha = fract(lvlFrac).mul(float(TAU))
       const cA = cos(alpha), sA = sin(alpha)
       const off = offUniforms[lvl]
 
-      // D = offset direction (rotated N), E = perpendicular (rotated B)
-      const dx = cA.mul(nx).add(sA.mul(bx)).toVar(`dx${lvl}`)
-      const dy = cA.mul(ny).add(sA.mul(by)).toVar(`dy${lvl}`)
-      const dz = cA.mul(nz).add(sA.mul(bz)).toVar(`dz${lvl}`)
-      const ex = sA.negate().mul(nx).add(cA.mul(bx)).toVar(`ex${lvl}`)
-      const ey = sA.negate().mul(ny).add(cA.mul(by)).toVar(`ey${lvl}`)
-      const ez = sA.negate().mul(nz).add(cA.mul(bz)).toVar(`ez${lvl}`)
+      // Rotate parent frame by winding angle
+      const nnx = cA.mul(nx).add(sA.mul(bx)).toVar(`nnx${lvl}`)
+      const nny = cA.mul(ny).add(sA.mul(by)).toVar(`nny${lvl}`)
+      const nnz = cA.mul(nz).add(sA.mul(bz)).toVar(`nnz${lvl}`)
+      const nbx = sA.negate().mul(nx).add(cA.mul(bx)).toVar(`nbx${lvl}`)
+      const nby = sA.negate().mul(ny).add(cA.mul(by)).toVar(`nby${lvl}`)
+      const nbz = sA.negate().mul(nz).add(cA.mul(bz)).toVar(`nbz${lvl}`)
 
       // Offset position
-      px.addAssign(off.mul(dx))
-      py.addAssign(off.mul(dy))
-      pz.addAssign(off.mul(dz))
+      px.addAssign(off.mul(nnx))
+      py.addAssign(off.mul(nny))
+      pz.addAssign(off.mul(nnz))
 
-      // Accumulate tangent: T += off * angularRate * E
-      // angularRate = totals[k] * TAU, precomputed as f64 then baked to f32
-      const winding = off.mul(float(totalTurns[lvl] * TAU))
-      dtx.addAssign(winding.mul(ex))
-      dty.addAssign(winding.mul(ey))
-      dtz.addAssign(winding.mul(ez))
-
-      // Gram-Schmidt: project D perpendicular to tangent → N
-      const tLen = sqrt(dtx.mul(dtx).add(dty.mul(dty)).add(dtz.mul(dtz)))
-      const txn = dtx.div(tLen), tyn = dty.div(tLen), tzn = dtz.div(tLen)
-      const dot = dx.mul(txn).add(dy.mul(tyn)).add(dz.mul(tzn))
-      const nnx = dx.sub(dot.mul(txn)).toVar(`nnx${lvl}`)
-      const nny = dy.sub(dot.mul(tyn)).toVar(`nny${lvl}`)
-      const nnz = dz.sub(dot.mul(tzn)).toVar(`nnz${lvl}`)
-      const nLen = sqrt(nnx.mul(nnx).add(nny.mul(nny)).add(nnz.mul(nnz)))
-      nx.assign(nnx.div(nLen)); ny.assign(nny.div(nLen)); nz.assign(nnz.div(nLen))
-
-      // B = T × N
-      bx.assign(tyn.mul(nz).sub(tzn.mul(ny)))
-      by.assign(tzn.mul(nx).sub(txn.mul(nz)))
-      bz.assign(txn.mul(ny).sub(tyn.mul(nx)))
+      // Update frame for next level
+      nx.assign(nnx); ny.assign(nny); nz.assign(nnz)
+      bx.assign(nbx); by.assign(nby); bz.assign(nbz)
     }
 
     posBuf.element(idx).assign(vec3(px, py, pz))
@@ -179,10 +156,22 @@ export default function Scene() {
     const params = {
       coilRadius: 1,
       turnSpacing: 10,
-      offsets: [0, 0.1740, 0.0871, 0.0300, 0.0007, 0.0005, 0.0001],
+      fillFactor: 0.55,
+      offsets: [0, 0, 0, 0, 0, 0, 0],
       panSpeed: 10,
       focusT: 0.5,
     }
+
+    // Each level: offset = parentOffset * fillFactor / sqrt(turnsPerParent)
+    // sqrt accounts for tighter winding needing proportionally smaller offset
+    function syncOffsets() {
+      let off = params.coilRadius
+      for (let i = 1; i < params.offsets.length; i++) {
+        off = off * params.fillFactor / Math.sqrt(HIERARCHY[i].turnsPerParent)
+        params.offsets[i] = off
+      }
+    }
+    syncOffsets()
 
     // Shared uniforms
     // For precision: tBase is the t value at idx=0, computed in f64 on CPU.
@@ -232,10 +221,10 @@ export default function Scene() {
 
     function cameraFrame(t: number) {
       const totals = getTotalTurns(), hc = getHelixConsts()
-      evalCoil(t, 2, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _pos, _nrm, _bin)
+      evalCoil(t, 3, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _pos, _nrm, _bin)
       const eps = 1e-7, p0 = { x: 0, y: 0, z: 0 }, p1 = { x: 0, y: 0, z: 0 }
-      evalCoil(Math.max(0, t - eps), 2, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, p0)
-      evalCoil(Math.min(1, t + eps), 2, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, p1)
+      evalCoil(Math.max(0, t - eps), 3, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, p0)
+      evalCoil(Math.min(1, t + eps), 3, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, p1)
       _tan.set(p1.x - p0.x, p1.y - p0.y, p1.z - p0.z).normalize()
       const nv = new THREE.Vector3(_nrm.x, _nrm.y, _nrm.z).addScaledVector(_tan, -new THREE.Vector3(_nrm.x, _nrm.y, _nrm.z).dot(_tan)).normalize()
       const bv = new THREE.Vector3().crossVectors(_tan, nv)
@@ -274,26 +263,27 @@ export default function Scene() {
       rt.levels = []
     }
 
-    // ── Dispatch all compute shaders ──────────────────────────────────────
+    // ── CPU vertex generation (f64 precision, no GPU) ────────────────────
     function dispatchCompute(rt: Runtime) {
       const totals = getTotalTurns()
-      for (let i = 0; i < offUniforms.length; i++) offUniforms[i].value = params.offsets[i]
+      const hc = getHelixConsts()
+      const pos = { x: 0, y: 0, z: 0 }
+
       for (let i = 0; i < rt.levels.length; i++) {
         const w = winBounds(totals[i], HIERARCHY[i].spt)
         const maxPts = rt.levels[i].maxPts
-        const tBase = w.tS                          // f64
-        const tStep = w.tR / (maxPts - 1)           // f64
-        tBaseU.value = tBase
-        tStepU.value = tStep
-        // Cascade fractional turns in f64 — keeps intermediate values small
-        // so we don't lose precision multiplying tBase by huge totals
-        let f = tBase * CENTURY_TURNS
-        baseFracUniforms[0].value = f % 1
-        for (let k = 1; k < totals.length; k++) {
-          f = (f % 1) * HIERARCHY[k].turnsPerParent
-          baseFracUniforms[k].value = f % 1
+        const arr = rt.levels[i].posBuf.value.array as Float32Array
+
+        for (let v = 0; v < maxPts; v++) {
+          const t = w.tS + w.tR * v / (maxPts - 1)
+          evalCoil(t, i, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, pos)
+          arr[v * 3] = pos.x
+          arr[v * 3 + 1] = pos.y
+          arr[v * 3 + 2] = pos.z
         }
-        rt.renderer.compute(rt.levels[i].compute)
+
+        rt.levels[i].posBuf.value.needsUpdate = true
+        ;(rt.levels[i].posBuf as any).version = (rt.levels[i].posBuf as any).version + 1 || 1
       }
     }
 
@@ -359,18 +349,35 @@ export default function Scene() {
       controls.target.copy(p)
       camera.position.copy(p).addScaledVector(_rN, -2).addScaledVector(_rB, 0.5)
 
-      // Right-click drag
-      let dragging = false, dragStartX = 0, dragStartT = 0, focusDragging = false
+      // Right-click analog stick: hold and move mouse, speed = distance from click point
+      let dragging = false, dragOriginX = 0, dragDisplacement = 0, focusDragging = false
+      let panRAF = 0
+
       const focusBinding = pane.addBinding(params, 'focusT', { min: 0, max: 1, step: 0.0001, label: 'focus' })
       focusBinding.on('change', () => { if (!focusDragging) updateFocus(rt) })
-      canvas.addEventListener('pointerdown', (e) => { if (e.button === 2) { dragging = true; focusDragging = true; dragStartX = e.clientX; dragStartT = params.focusT; e.preventDefault() } })
-      canvas.addEventListener('pointermove', (e) => {
+
+      function panTick() {
         if (!dragging) return
         const totals = getTotalTurns()
-        params.focusT = THREE.MathUtils.clamp(dragStartT - (e.clientX - dragStartX) * params.panSpeed / totals[totals.length - 1], 0, 1)
+        const speed = dragDisplacement * params.panSpeed / totals[totals.length - 1]
+        params.focusT = THREE.MathUtils.clamp(params.focusT - speed, 0, 1)
         updateFocus(rt)
+        panRAF = requestAnimationFrame(panTick)
+      }
+
+      canvas.addEventListener('pointerdown', (e) => {
+        if (e.button === 2) {
+          dragging = true; focusDragging = true
+          dragOriginX = e.clientX; dragDisplacement = 0
+          e.preventDefault()
+          panRAF = requestAnimationFrame(panTick)
+        }
       })
-      const stopDrag = () => { dragging = false; focusDragging = false }
+      canvas.addEventListener('pointermove', (e) => {
+        if (!dragging) return
+        dragDisplacement = (e.clientX - dragOriginX) * 0.01
+      })
+      const stopDrag = () => { dragging = false; focusDragging = false; cancelAnimationFrame(panRAF) }
       canvas.addEventListener('pointerup', stopDrag)
       canvas.addEventListener('pointercancel', stopDrag)
       canvas.addEventListener('contextmenu', (e) => e.preventDefault())
@@ -382,18 +389,8 @@ export default function Scene() {
       pane.addBinding(params, 'turnSpacing', { min: 0.1, max: 20, step: 0.1, label: 'turn spacing' })
         .on('change', () => { syncHelixUniforms(); dispatchCompute(rt) })
 
-      const names = ['century', 'decade', 'year', 'day', 'hour', 'min', 'sec']
-      for (let i = 1; i < params.offsets.length; i++) {
-        const idx = i
-        const isLast = i === 6
-        pane.addBinding(params.offsets, idx as unknown as keyof typeof params.offsets, {
-          min: isLast ? 0.000001 : 0.0001,
-          max: i < 3 ? 2 : 0.5,
-          step: isLast ? 0.000001 : 0.0001,
-          label: names[idx] + ' off',
-        })
-          .on('change', () => { offUniforms[idx].value = params.offsets[idx]; dispatchCompute(rt) })
-      }
+      pane.addBinding(params, 'fillFactor', { min: 0.1, max: 1.5, step: 0.01, label: 'fill factor' })
+        .on('change', () => { syncOffsets(); dispatchCompute(rt) })
       pane.addBinding(params, 'panSpeed', { min: 1, max: 3600, step: 1, label: 'sec/pixel' })
 
       const animate = () => {
