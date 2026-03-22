@@ -872,7 +872,12 @@ export default function Scene() {
           const r = ev.level === 0 ? 3 : ev.level === 1 ? 2 : 1.5
           ctx.fillStyle = ev.color
           ctx.globalAlpha = 0.9
-          ctx.beginPath(); ctx.arc(px, h * 0.4, r * devicePixelRatio, 0, Math.PI * 2); ctx.fill()
+          const bandCenter = 0.25 + ev.level * (0.5 / 3)
+          const bandHalf = 0.06
+          // Deterministic random per event index
+          const hash = Math.sin(ev.t * 127.1 + ev.level * 311.7) * 43758.5453 % 1
+          const dotY = h * (bandCenter + (hash - 0.5) * bandHalf * 2)
+          ctx.beginPath(); ctx.arc(px, dotY, r * devicePixelRatio, 0, Math.PI * 2); ctx.fill()
         }
         ctx.globalAlpha = 1
 
