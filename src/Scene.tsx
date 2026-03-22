@@ -132,7 +132,7 @@ export default function Scene() {
     const params = {
       coilRadius: 1, turnSpacing: 10, fillFactor: 0.55,
       offsets: [0, 0, 0, 0, 0, 0, 0],
-      panSpeed: 0.001, focusT: 0.8228,  // Julius Caesar assassinated, 44 BCE
+      panSpeed: 0.001, focusT: 0.7854,  // Ionian Revolt, ~497 BCE
     }
 
     function syncOffsets() {
@@ -415,7 +415,9 @@ export default function Scene() {
       const focusSegs = new THREE.LineSegments(focusGeom, new THREE.LineBasicMaterial({ color: 0xff4444 }))
       focusSegs.frustumCulled = false; scene.add(focusSegs)
 
-      function eventWindowYears(level: number): number { return level === 0 ? Infinity : level === 1 ? 500 : 50 }
+      function eventWindowYears(level: number): number {
+        return level === 0 ? 3000 : level === 1 ? 500 : level === 2 ? 50 : level === 3 ? 5 : 0.5
+      }
 
       // ── Events ────────────────────────────────────────────────────────────
       interface CoilEvent { name: string; t: number; level: number; color: string }
@@ -438,41 +440,128 @@ export default function Scene() {
       }
 
       const events: CoilEvent[] = [
-        // Ancient civilizations
-        { name: 'Founding of Rome', t: yearToT(-753), level: 0, color: '#ff6b6b' },
-        { name: 'Fall of Western Rome', t: yearToT(476), level: 0, color: '#ff6b6b' },
-        { name: 'First Olympic Games', t: yearToT(-776), level: 0, color: '#ffd93d' },
-        { name: 'Battle of Marathon', t: yearToT(-490), level: 1, color: '#6bcb77' },
-        { name: 'Battle of Thermopylae', t: yearToT(-480), level: 1, color: '#6bcb77' },
-        { name: 'Death of Socrates', t: yearToT(-399), level: 1, color: '#4d96ff' },
-        { name: 'Alexander the Great born', t: yearToT(-356), level: 1, color: '#9b59b6' },
-        { name: 'Death of Alexander', t: yearToT(-323), level: 1, color: '#9b59b6' },
-        { name: 'Julius Caesar assassinated', t: dateToT('-0044-03-15'), level: 1, color: '#ff6b6b' },
-        { name: 'Augustus becomes Emperor', t: yearToT(-27), level: 1, color: '#ff6b6b' },
-        { name: 'Eruption of Vesuvius', t: dateToT('0079-08-24'), level: 1, color: '#e74c3c' },
-        { name: 'Construction of Parthenon begins', t: yearToT(-447), level: 1, color: '#ffd93d' },
-        { name: 'Peloponnesian War begins', t: yearToT(-431), level: 1, color: '#6bcb77' },
-        { name: 'Birth of Aristotle', t: yearToT(-384), level: 1, color: '#4d96ff' },
-        { name: 'Cleopatra dies', t: yearToT(-30), level: 1, color: '#e74c3c' },
-        // Ancient world
+        // Prehistoric & early civilization
+        { name: 'First cave paintings (Lascaux)', t: yearToT(-8000), level: 0, color: '#c0a060' },
+        { name: 'Agriculture begins (Fertile Crescent)', t: yearToT(-9500), level: 0, color: '#6bcb77' },
+        { name: 'Çatalhöyük settled', t: yearToT(-7500), level: 0, color: '#c0a060' },
+        { name: 'First writing (Sumerian cuneiform)', t: yearToT(-3400), level: 0, color: '#c0a060' },
+        { name: 'Unification of Egypt', t: yearToT(-3100), level: 0, color: '#ffd93d' },
         { name: 'Great Pyramid built', t: yearToT(-2560), level: 0, color: '#ffd93d' },
+        { name: 'Indus Valley Civilization peak', t: yearToT(-2500), level: 0, color: '#9b59b6' },
+        { name: 'Stonehenge completed', t: yearToT(-2500), level: 0, color: '#aaa' },
+        { name: 'Bronze Age begins', t: yearToT(-3300), level: 0, color: '#c0a060' },
         { name: 'Code of Hammurabi', t: yearToT(-1754), level: 0, color: '#c0a060' },
+        { name: 'Shang Dynasty begins', t: yearToT(-1600), level: 0, color: '#ffd93d' },
         { name: 'Trojan War (traditional)', t: yearToT(-1184), level: 0, color: '#ffd93d' },
         { name: 'Iron Age begins', t: yearToT(-1200), level: 0, color: '#aaa' },
-        // Medieval & modern
+        { name: 'Phoenician alphabet spreads', t: yearToT(-1050), level: 0, color: '#c0a060' },
+        // Classical antiquity
+        { name: 'First Olympic Games', t: yearToT(-776), level: 0, color: '#ffd93d' },
+        { name: 'Founding of Rome', t: yearToT(-753), level: 0, color: '#ff6b6b' },
+        { name: 'Buddha born', t: yearToT(-563), level: 0, color: '#9b59b6' },
+        { name: 'Confucius born', t: yearToT(-551), level: 0, color: '#9b59b6' },
+        { name: 'Athenian democracy established', t: yearToT(-508), level: 1, color: '#4d96ff' },
+        // Ionian Revolt (499–493 BCE) — level 2 summary, level 3 details
+        { name: 'Ionian Revolt begins', t: yearToT(-499), level: 2, color: '#6bcb77' },
+        { name: 'Aristagoras appeals to Athens', t: dateToT('-0499-01-15'), level: 3, color: '#6bcb77' },
+        { name: 'Greeks burn Sardis', t: dateToT('-0498-06-01'), level: 3, color: '#e74c3c' },
+        { name: 'Battle of Ephesus', t: dateToT('-0498-09-01'), level: 3, color: '#e74c3c' },
+        { name: 'Cyprus joins revolt', t: dateToT('-0497-03-01'), level: 3, color: '#6bcb77' },
+        { name: 'Battle of Salamis (Cyprus)', t: dateToT('-0497-07-01'), level: 3, color: '#e74c3c' },
+        { name: 'Carians defeated at Marsyas', t: dateToT('-0497-10-01'), level: 3, color: '#e74c3c' },
+        { name: 'Aristagoras killed in Thrace', t: dateToT('-0496-04-01'), level: 3, color: '#e74c3c' },
+        { name: 'Persian siege of Miletus begins', t: dateToT('-0494-06-01'), level: 3, color: '#e74c3c' },
+        { name: 'Battle of Lade', t: dateToT('-0494-08-01'), level: 3, color: '#e74c3c' },
+        { name: 'Fall of Miletus', t: dateToT('-0494-10-01'), level: 3, color: '#e74c3c' },
+        { name: 'Ionian Revolt ends', t: yearToT(-493), level: 2, color: '#e74c3c' },
+        { name: 'Battle of Marathon', t: yearToT(-490), level: 1, color: '#6bcb77' },
+        { name: 'Battle of Thermopylae', t: yearToT(-480), level: 1, color: '#6bcb77' },
+        { name: 'Construction of Parthenon begins', t: yearToT(-447), level: 1, color: '#ffd93d' },
+        { name: 'Peloponnesian War begins', t: yearToT(-431), level: 1, color: '#6bcb77' },
+        { name: 'Death of Socrates', t: yearToT(-399), level: 1, color: '#4d96ff' },
+        { name: 'Birth of Aristotle', t: yearToT(-384), level: 1, color: '#4d96ff' },
+        { name: 'Alexander the Great born', t: yearToT(-356), level: 1, color: '#9b59b6' },
+        { name: 'Death of Alexander', t: yearToT(-323), level: 1, color: '#9b59b6' },
+        { name: 'Ashoka unifies India', t: yearToT(-261), level: 1, color: '#9b59b6' },
+        { name: 'Great Wall construction begins', t: yearToT(-221), level: 0, color: '#ffd93d' },
+        { name: 'Julius Caesar assassinated', t: dateToT('-0044-03-15'), level: 1, color: '#ff6b6b' },
+        { name: 'Augustus becomes Emperor', t: yearToT(-27), level: 1, color: '#ff6b6b' },
+        { name: 'Cleopatra dies', t: yearToT(-30), level: 1, color: '#e74c3c' },
+        { name: 'Jesus of Nazareth born', t: yearToT(-4), level: 0, color: '#9b59b6' },
+        { name: 'Eruption of Vesuvius', t: dateToT('0079-08-24'), level: 1, color: '#e74c3c' },
+        { name: 'Colosseum completed', t: yearToT(80), level: 1, color: '#ffd93d' },
+        // Late antiquity & early medieval
+        { name: 'Constantine converts to Christianity', t: yearToT(312), level: 1, color: '#9b59b6' },
+        { name: 'Fall of Western Rome', t: yearToT(476), level: 0, color: '#ff6b6b' },
+        { name: 'Muhammad born', t: yearToT(570), level: 0, color: '#9b59b6' },
+        { name: 'Islamic Golden Age begins', t: yearToT(750), level: 0, color: '#ffd93d' },
+        { name: 'Charlemagne crowned Emperor', t: dateToT('0800-12-25'), level: 1, color: '#ff6b6b' },
+        { name: 'Viking Age begins', t: yearToT(793), level: 1, color: '#6bcb77' },
+        // High medieval
+        { name: 'Norman Conquest of England', t: yearToT(1066), level: 1, color: '#6bcb77' },
+        { name: 'First Crusade', t: yearToT(1096), level: 1, color: '#e74c3c' },
+        { name: 'Genghis Khan unites Mongols', t: yearToT(1206), level: 0, color: '#e74c3c' },
+        { name: 'Magna Carta', t: dateToT('1215-06-15'), level: 1, color: '#6bcb77' },
+        { name: 'Black Death reaches Europe', t: yearToT(1347), level: 0, color: '#e74c3c' },
+        { name: 'Ming Dynasty begins', t: yearToT(1368), level: 1, color: '#ffd93d' },
+        // Renaissance & early modern
+        { name: 'Gutenberg printing press', t: yearToT(1440), level: 1, color: '#c0a060' },
         { name: 'Fall of Constantinople', t: yearToT(1453), level: 0, color: '#e74c3c' },
         { name: 'Columbus reaches Americas', t: dateToT('1492-10-12'), level: 1, color: '#4d96ff' },
-        { name: 'Gutenberg printing press', t: yearToT(1440), level: 1, color: '#c0a060' },
-        { name: 'Magna Carta', t: dateToT('1215-06-15'), level: 1, color: '#6bcb77' },
-        { name: 'French Revolution', t: dateToT('1789-07-14'), level: 1, color: '#ff6b6b' },
+        { name: 'Vasco da Gama reaches India', t: yearToT(1498), level: 1, color: '#4d96ff' },
+        { name: 'Luther\'s 95 Theses', t: yearToT(1517), level: 1, color: '#9b59b6' },
+        { name: 'Magellan circumnavigates globe', t: yearToT(1522), level: 1, color: '#4d96ff' },
+        { name: 'Copernicus publishes heliocentric model', t: yearToT(1543), level: 1, color: '#4d96ff' },
+        { name: 'Shakespeare born', t: yearToT(1564), level: 1, color: '#ffd93d' },
+        { name: 'Galileo observes Jupiter\'s moons', t: yearToT(1610), level: 1, color: '#4d96ff' },
+        { name: 'Newton publishes Principia', t: yearToT(1687), level: 1, color: '#4d96ff' },
+        // Revolutions & enlightenment
         { name: 'American Independence', t: dateToT('1776-07-04'), level: 1, color: '#4d96ff' },
-        // Modern
-        { name: 'Moon Landing', t: dateToT('1969-07-20T20:17:00Z'), level: 2, color: '#00ffcc' },
+        { name: 'French Revolution', t: dateToT('1789-07-14'), level: 1, color: '#ff6b6b' },
+        { name: 'Haitian Revolution', t: yearToT(1791), level: 1, color: '#ff6b6b' },
+        { name: 'Napoleon crowned Emperor', t: yearToT(1804), level: 1, color: '#ff6b6b' },
+        { name: 'Battle of Waterloo', t: dateToT('1815-06-18'), level: 1, color: '#6bcb77' },
+        // Industrial age
+        { name: 'Steam locomotive (Stephenson)', t: yearToT(1825), level: 1, color: '#c0a060' },
+        { name: 'Darwin publishes Origin of Species', t: yearToT(1859), level: 1, color: '#4d96ff' },
+        { name: 'US Civil War begins', t: yearToT(1861), level: 1, color: '#e74c3c' },
+        { name: 'Abolition of US slavery', t: yearToT(1865), level: 1, color: '#6bcb77' },
+        { name: 'Meiji Restoration (Japan)', t: yearToT(1868), level: 1, color: '#ffd93d' },
+        { name: 'Telephone invented', t: yearToT(1876), level: 2, color: '#c0a060' },
+        { name: 'Light bulb invented', t: yearToT(1879), level: 2, color: '#ffd93d' },
+        // 20th century
+        { name: 'First powered flight', t: dateToT('1903-12-17'), level: 1, color: '#00ffcc' },
+        { name: 'Einstein publishes relativity', t: yearToT(1905), level: 1, color: '#4d96ff' },
         { name: 'World War I begins', t: dateToT('1914-07-28'), level: 1, color: '#e74c3c' },
+        { name: 'Russian Revolution', t: yearToT(1917), level: 1, color: '#ff6b6b' },
+        { name: 'World War I ends', t: dateToT('1918-11-11'), level: 1, color: '#6bcb77' },
+        { name: 'Penicillin discovered', t: yearToT(1928), level: 2, color: '#4d96ff' },
         { name: 'World War II begins', t: dateToT('1939-09-01'), level: 1, color: '#e74c3c' },
+        { name: 'D-Day', t: dateToT('1944-06-06'), level: 2, color: '#6bcb77' },
+        { name: 'Atomic bomb dropped on Hiroshima', t: dateToT('1945-08-06'), level: 1, color: '#e74c3c' },
         { name: 'World War II ends', t: dateToT('1945-09-02'), level: 1, color: '#6bcb77' },
-        { name: 'Berlin Wall falls', t: dateToT('1989-11-09'), level: 2, color: '#ffd93d' },
-        { name: 'Internet goes public', t: yearToT(1991), level: 2, color: '#4d96ff' },
+        { name: 'United Nations founded', t: yearToT(1945), level: 1, color: '#4d96ff' },
+        { name: 'India gains independence', t: yearToT(1947), level: 1, color: '#6bcb77' },
+        { name: 'Israel established', t: yearToT(1948), level: 1, color: '#ff6b6b' },
+        { name: 'DNA structure discovered', t: yearToT(1953), level: 2, color: '#4d96ff' },
+        { name: 'Sputnik launched', t: dateToT('1957-10-04'), level: 2, color: '#00ffcc' },
+        { name: 'Cuban Missile Crisis', t: yearToT(1962), level: 2, color: '#e74c3c' },
+        { name: 'Moon Landing', t: dateToT('1969-07-20T20:17:00'), level: 1, color: '#00ffcc' },
+        { name: 'Fall of Saigon', t: yearToT(1975), level: 2, color: '#e74c3c' },
+        { name: 'First personal computer', t: yearToT(1977), level: 2, color: '#c0a060' },
+        { name: 'Chernobyl disaster', t: dateToT('1986-04-26'), level: 2, color: '#e74c3c' },
+        { name: 'Berlin Wall falls', t: dateToT('1989-11-09'), level: 1, color: '#ffd93d' },
+        { name: 'World Wide Web launched', t: yearToT(1991), level: 1, color: '#4d96ff' },
+        { name: 'Soviet Union dissolves', t: yearToT(1991), level: 1, color: '#ff6b6b' },
+        { name: 'Mandela becomes president', t: yearToT(1994), level: 2, color: '#6bcb77' },
+        // 21st century
+        { name: 'September 11 attacks', t: dateToT('2001-09-11'), level: 1, color: '#e74c3c' },
+        { name: 'Human genome sequenced', t: yearToT(2003), level: 2, color: '#4d96ff' },
+        { name: 'iPhone released', t: yearToT(2007), level: 2, color: '#c0a060' },
+        { name: 'Arab Spring begins', t: yearToT(2011), level: 2, color: '#ff6b6b' },
+        { name: 'Higgs boson discovered', t: yearToT(2012), level: 2, color: '#4d96ff' },
+        { name: 'COVID-19 pandemic begins', t: dateToT('2020-03-11'), level: 1, color: '#e74c3c' },
+        { name: 'ChatGPT released', t: dateToT('2022-11-30'), level: 2, color: '#00ffcc' },
       ]
 
       // Pre-parsed event colors
@@ -623,7 +712,7 @@ export default function Scene() {
 
       // ── Camera level panel (draggable) ────────────────────────────────────
       const levelPanel = document.createElement('div')
-      levelPanel.style.cssText = 'position:absolute;left:20px;bottom:20px;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;color:#ccc;cursor:move;user-select:none;z-index:10'
+      levelPanel.style.cssText = 'position:absolute;left:20px;top:20px;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;color:#ccc;cursor:move;user-select:none;z-index:10'
       const timeDisplay = document.createElement('div')
       timeDisplay.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #333'
       const timeLabel = document.createElement('div')
@@ -716,6 +805,103 @@ export default function Scene() {
         })
       }
       updateLevelHighlight()
+
+      // ── Minimap timeline ─────────────────────────────────────────────────
+      const minimap = document.createElement('div')
+      minimap.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:90%;height:28px;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:4px;z-index:10;overflow:hidden'
+      const miniCanvas = document.createElement('canvas')
+      miniCanvas.style.cssText = 'width:100%;height:100%'
+      minimap.appendChild(miniCanvas)
+      canvas.parentElement!.appendChild(minimap)
+
+      const K_WARP = 3 // exponential compression factor
+
+      function yearToMiniPx(year: number, focusYr: number, halfW: number, halfRange: number): number {
+        const dy = year - focusYr
+        return halfW + halfW * Math.asinh((dy / halfRange) * Math.sinh(K_WARP)) / K_WARP
+      }
+
+      function updateMinimap() {
+        const rect = minimap.getBoundingClientRect()
+        const w = Math.floor(rect.width * devicePixelRatio)
+        const h = Math.floor(rect.height * devicePixelRatio)
+        if (miniCanvas.width !== w || miniCanvas.height !== h) {
+          miniCanvas.width = w; miniCanvas.height = h
+        }
+        const ctx = miniCanvas.getContext('2d')!
+        ctx.clearRect(0, 0, w, h)
+        const halfW = w / 2
+        const focusYr = START_YEAR + params.focusT * TOTAL_YEARS
+        const camLvl = Math.round(cameraLevel)
+        // Symmetric sliding window: halfRange shrinks with zoom level
+        const levelRanges = [TOTAL_YEARS / 2, 2000, 200, 5, 0.5, 0.01, 0.0002]
+        const lo = Math.floor(cameraLevel), hi = Math.min(lo + 1, levelRanges.length - 1)
+        const frac = cameraLevel - lo
+        const halfRange = levelRanges[lo] + frac * (levelRanges[hi] - levelRanges[lo])
+        const edgeYrL = focusYr - halfRange, edgeYrR = focusYr + halfRange
+
+        // Tick marks: centuries always, decades if room
+        ctx.strokeStyle = 'rgba(255,255,255,0.12)'
+        ctx.lineWidth = 1
+        const firstCentury = Math.ceil(Math.max(START_YEAR, edgeYrL) / 100) * 100
+        const lastCentury = Math.min(END_YEAR, edgeYrR)
+        for (let yr = firstCentury; yr <= lastCentury; yr += 100) {
+          const px = yearToMiniPx(yr, focusYr, halfW, halfRange)
+          if (px < 0 || px > w) continue
+          ctx.beginPath(); ctx.moveTo(px, h * 0.3); ctx.lineTo(px, h); ctx.stroke()
+        }
+        if (camLvl >= 1) {
+          ctx.strokeStyle = 'rgba(255,255,255,0.06)'
+          const firstDecade = Math.ceil(Math.max(START_YEAR, edgeYrL) / 10) * 10
+          const lastDecade = Math.min(END_YEAR, edgeYrR)
+          for (let yr = firstDecade; yr <= lastDecade; yr += 10) {
+            if (yr % 100 === 0) continue
+            const px = yearToMiniPx(yr, focusYr, halfW, halfRange)
+            if (px < 0 || px > w) continue
+            const prevPx = yearToMiniPx(yr - 10, focusYr, halfW, halfRange)
+            if (Math.abs(px - prevPx) < 3) continue
+            ctx.beginPath(); ctx.moveTo(px, h * 0.55); ctx.lineTo(px, h); ctx.stroke()
+          }
+        }
+
+        // Events
+        for (const ev of events) {
+          const evYr = START_YEAR + ev.t * TOTAL_YEARS
+          const px = yearToMiniPx(evYr, focusYr, halfW, halfRange)
+          if (px < -2 || px > w + 2) continue
+          const r = ev.level === 0 ? 3 : ev.level === 1 ? 2 : 1.5
+          ctx.fillStyle = ev.color
+          ctx.globalAlpha = 0.9
+          ctx.beginPath(); ctx.arc(px, h * 0.4, r * devicePixelRatio, 0, Math.PI * 2); ctx.fill()
+        }
+        ctx.globalAlpha = 1
+
+        // Helix boundary indicators
+        const startPx = yearToMiniPx(START_YEAR, focusYr, halfW, halfRange)
+        const endPx = yearToMiniPx(END_YEAR, focusYr, halfW, halfRange)
+        ctx.strokeStyle = 'rgba(255,255,255,0.4)'
+        ctx.lineWidth = 1.5 * devicePixelRatio
+        if (startPx > 0 && startPx < w) {
+          ctx.beginPath(); ctx.moveTo(startPx, 0); ctx.lineTo(startPx, h); ctx.stroke()
+        }
+        if (endPx > 0 && endPx < w) {
+          ctx.beginPath(); ctx.moveTo(endPx, 0); ctx.lineTo(endPx, h); ctx.stroke()
+        }
+
+        // Focus indicator (center line)
+        ctx.strokeStyle = '#ff4444'
+        ctx.lineWidth = 2 * devicePixelRatio
+        ctx.beginPath(); ctx.moveTo(halfW, 0); ctx.lineTo(halfW, h); ctx.stroke()
+
+        // Edge year labels (show actual window edges, not clamped)
+        ctx.fillStyle = 'rgba(255,255,255,0.3)'
+        ctx.font = `${9 * devicePixelRatio}px monospace`
+        ctx.textBaseline = 'middle'
+        ctx.textAlign = 'left'
+        ctx.fillText(yearLabel(Math.round(edgeYrL)), 4 * devicePixelRatio, h * 0.45)
+        ctx.textAlign = 'right'
+        ctx.fillText(yearLabel(Math.round(edgeYrR)), w - 4 * devicePixelRatio, h * 0.45)
+      }
 
       // Draggable
       let panelDragging = false, panelDragX = 0, panelDragY = 0
@@ -833,7 +1019,7 @@ export default function Scene() {
           const diff = zoomTarget - cameraLevel
           if (Math.abs(diff) > 0.001) {
             cameraLevel += diff * 0.12
-            positionCamera(rt)
+            updateFocus(rt)
             updateLevelHighlight()
             updatePlayBtn()
           }
@@ -867,7 +1053,8 @@ export default function Scene() {
         const camLvl = Math.round(cameraLevel)
         let markerIdx = 0
 
-        // ── Events (always write line segments; labels only when on-screen) ─
+        // ── Events (always write line segments; collect labels for de-overlap) ─
+        const eventLabels: { scrX: number; scrY: number; opacity: number; ev: CoilEvent; anchorY: number }[] = []
         for (let i = 0; i < events.length; i++) {
           const ev = events[i]
           const evYear = START_YEAR + ev.t * TOTAL_YEARS
@@ -889,7 +1076,6 @@ export default function Scene() {
           markerColArr[j+2] = markerColArr[j+5] = rgb[2]
           markerIdx++
 
-          // Label: project and assign from pool (skip if off-screen)
           const fadeStart = evWindow === Infinity ? Infinity : evWindow * 0.7
           const opacity = evWindow === Infinity ? 1.0
             : temporalDist < fadeStart ? 1.0
@@ -902,25 +1088,41 @@ export default function Scene() {
           const scrY = (-_projVec.y * 0.5 + 0.5) * sh
           if (scrX < -200 || scrX > sw + 200 || scrY < -50 || scrY > sh + 50) continue
 
-          if (poolIdx >= POOL_SIZE) continue
+          eventLabels.push({ scrX, scrY, opacity, ev, anchorY: scrY })
+        }
+
+        // De-overlap: sort by screen Y, push overlapping labels downward
+        eventLabels.sort((a, b) => a.scrY - b.scrY)
+        const MIN_GAP = 16
+        for (let i = 1; i < eventLabels.length; i++) {
+          const prev = eventLabels[i - 1], cur = eventLabels[i]
+          if (Math.abs(cur.scrX - prev.scrX) > 200) continue
+          if (cur.scrY - prev.scrY < MIN_GAP) {
+            cur.scrY = prev.scrY + MIN_GAP
+          }
+        }
+
+        // Assign to pool
+        for (const lbl of eventLabels) {
+          if (poolIdx >= POOL_SIZE) break
           const div = labelPool[poolIdx++]
-          div.textContent = ev.name
+          div.textContent = lbl.ev.name
           div.style.display = 'block'
-          div.style.left = `${scrX}px`
-          div.style.top = `${scrY}px`
+          div.style.left = `${lbl.scrX}px`
+          div.style.top = `${lbl.scrY}px`
           div.style.fontSize = '14px'
-          div.style.opacity = String(Math.max(0.3, opacity))
-          div.style.color = ev.color
+          div.style.opacity = String(Math.max(0.3, lbl.opacity))
+          div.style.color = lbl.ev.color
           div.style.fontWeight = 'bold'
           div.style.textAlign = 'right'
           div.style.transform = 'translate(-100%, -100%)'
           div.style.pointerEvents = 'auto'
           div.style.cursor = 'pointer'
-          div.dataset.eventT = String(ev.t)
-          div.dataset.eventLevel = String(ev.level)
+          div.dataset.eventT = String(lbl.ev.t)
+          div.dataset.eventLevel = String(lbl.ev.level)
         }
 
-        // ── Label tiers (century → hour) ───────────────────────────────────
+        // ── Marker tiers (line segments only, no text labels) ──────────────
         for (const tier of LABEL_TIERS) {
           if (camLvl < tier.minCamLvl) continue
           const wndStart = tier.windowYears === Infinity ? START_YEAR : Math.max(START_YEAR, focusYear - tier.windowYears)
@@ -946,33 +1148,6 @@ export default function Scene() {
             markerColArr[j+1] = markerColArr[j+4] = 1
             markerColArr[j+2] = markerColArr[j+5] = 1
             markerIdx++
-
-            const temporalDist = Math.abs(year - focusYear)
-            const fadeStart = tier.windowYears === Infinity ? Infinity : tier.windowYears * 0.7
-            const opacity = tier.windowYears === Infinity ? 1.0
-              : temporalDist < fadeStart ? 1.0
-              : 1.0 - (temporalDist - fadeStart) / (tier.windowYears - fadeStart)
-
-            _projVec.set(sx, sy, sz).project(rt.camera)
-            if (_projVec.z > 1) continue
-            const scrX = (_projVec.x * 0.5 + 0.5) * sw
-            const scrY = (-_projVec.y * 0.5 + 0.5) * sh
-            if (scrX < -100 || scrX > sw + 100 || scrY < -50 || scrY > sh + 50) continue
-
-            if (poolIdx >= POOL_SIZE) continue
-            const div = labelPool[poolIdx++]
-            let text: string
-            if (tier.name === 'day') text = dayLabel(year)
-            else if (tier.name === 'hour') text = hourLabel(year)
-            else text = yearLabel(Math.round(year))
-
-            div.textContent = text
-            div.style.display = 'block'
-            div.style.left = `${scrX}px`
-            div.style.top = `${scrY}px`
-            div.style.fontSize = `${tier.fontPx}px`
-            div.style.opacity = String(Math.max(0.2, opacity))
-            div.style.color = 'white'
           }
         }
 
@@ -1004,6 +1179,7 @@ export default function Scene() {
         markerPosAttr.needsUpdate = true
         markerColAttr.needsUpdate = true
 
+        updateMinimap()
         rt.renderer.render(rt.scene, rt.camera)
       }
       rafRef.current = requestAnimationFrame(animate)
