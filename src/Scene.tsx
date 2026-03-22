@@ -6,6 +6,9 @@ import {
   float, vec3, cos, sin, sqrt, fract,
 } from 'three/tsl'
 import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
+import { TextGeometry } from 'three/examples/jsm/geometries/TextGeometry.js'
+import { Font } from 'three/examples/jsm/loaders/FontLoader.js'
+import helvetikerData from 'three/examples/fonts/helvetiker_regular.typeface.json'
 import { Pane } from 'tweakpane'
 
 const HIERARCHY = [
@@ -135,6 +138,7 @@ interface Runtime {
   renderer: WebGPURenderer; scene: THREE.Scene
   camera: THREE.PerspectiveCamera; controls: OrbitControls
   levels: LevelGPU[]
+  markers: { segments: THREE.LineSegments; starts: Float32Array; posAttr: THREE.BufferAttribute; textMeshes: THREE.Mesh[] } | null
   pane: Pane
 }
 
@@ -338,7 +342,47 @@ export default function Scene() {
 
       const pane = new Pane({ title: 'Coilendar' })
 
-      const rt: Runtime = { renderer, scene, camera, controls, levels: [], pane }
+      // ── Century markers (one per century boundary) ──────────────────────
+      const markerCount = Math.ceil(CENTURY_TURNS) + 1
+      const markerStarts = new Float32Array(markerCount * 3)
+      const markerLength = 1.0
+
+      const R = params.coilRadius, L = CENTURY_TURNS * params.turnSpacing
+      const omg = CENTURY_TURNS * TAU
+      for (let i = 0; i < markerCount; i++) {
+        const t = i / CENTURY_TURNS
+        const th = t * omg
+        markerStarts[i * 3] = R * Math.cos(th)
+        markerStarts[i * 3 + 1] = (t - 0.5) * L
+        markerStarts[i * 3 + 2] = R * Math.sin(th)
+      }
+
+      const markerPosArr = new Float32Array(markerCount * 2 * 3)
+      const markerPosAttr = new THREE.BufferAttribute(markerPosArr, 3)
+      const markerGeom = new THREE.BufferGeometry()
+      markerGeom.setAttribute('position', markerPosAttr)
+      const markerMat = new THREE.LineBasicMaterial({ color: 0xffffff })
+      const markerSegments = new THREE.LineSegments(markerGeom, markerMat)
+      markerSegments.frustumCulled = false
+      scene.add(markerSegments)
+
+      // Create text labels for each century using TextGeometry
+      const font = new Font(helvetikerData as any)
+      const textMat = new THREE.MeshBasicMaterial({ color: 0xffffff, depthTest: false })
+      const textMeshes: THREE.Mesh[] = []
+      for (let i = 0; i < markerCount; i++) {
+        const year = START_YEAR + i * 100
+        const label = year < 0 ? `${-year} BCE` : year === 0 ? '1 BCE' : `${year} CE`
+        const textGeom = new TextGeometry(label, { font, size: 0.15, depth: 0 })
+        const mesh = new THREE.Mesh(textGeom, textMat)
+        mesh.frustumCulled = false
+        scene.add(mesh)
+        textMeshes.push(mesh)
+      }
+
+      const markers = { segments: markerSegments, starts: markerStarts, posAttr: markerPosAttr, textMeshes }
+
+      const rt: Runtime = { renderer, scene, camera, controls, levels: [], markers, pane }
       runtimeRef.current = rt
 
       rt.levels = createLevels(scene)
@@ -393,10 +437,48 @@ export default function Scene() {
         .on('change', () => { syncOffsets(); dispatchCompute(rt) })
       pane.addBinding(params, 'panSpeed', { min: 1, max: 3600, step: 1, label: 'sec/pixel' })
 
+      const _camRight = new THREE.Vector3()
+      const _camFwd = new THREE.Vector3()
+
       const animate = () => {
         if (disposed) return
         rafRef.current = requestAnimationFrame(animate)
         rt.controls.update()
+
+        // Update marker endpoints to be horizontal in screen space
+        if (rt.markers) {
+          const { starts, posAttr } = rt.markers
+          const arr = posAttr.array as Float32Array
+          const mc = starts.length / 3
+
+          // Camera right vector = screen horizontal direction in world space
+          rt.camera.getWorldDirection(_camFwd)
+          _camRight.crossVectors(_camFwd, rt.camera.up).normalize()
+
+          for (let i = 0; i < mc; i++) {
+            const sx = starts[i * 3], sy = starts[i * 3 + 1], sz = starts[i * 3 + 2]
+            const j = i * 6
+            // Start vertex = point on coil
+            arr[j] = sx; arr[j + 1] = sy; arr[j + 2] = sz
+            // End vertex = start + markerLength in screen-horizontal direction
+            const ex = sx + markerLength * _camRight.x
+            const ey = sy + markerLength * _camRight.y
+            const ez = sz + markerLength * _camRight.z
+            arr[j + 3] = ex; arr[j + 4] = ey; arr[j + 5] = ez
+
+            // Position text above marker end, oriented to face camera
+            const tm = rt.markers!.textMeshes[i]
+            const up = rt.camera.up
+            tm.position.set(
+              ex + 0.15 * up.x,
+              ey + 0.15 * up.y,
+              ez + 0.15 * up.z,
+            )
+            tm.quaternion.copy(rt.camera.quaternion)
+          }
+          posAttr.needsUpdate = true
+        }
+
         rt.renderer.render(rt.scene, rt.camera)
       }
       rafRef.current = requestAnimationFrame(animate)
