@@ -492,11 +492,16 @@ export default function Scene() {
         zoomTarget = THREE.MathUtils.clamp(zoomTarget + step, 0, HIERARCHY.length - 1)
       }, { passive: false })
 
-      let dragging = false, dragOriginX = 0, dragDisplacement = 0, focusDragging = false
+      let dragging = false, dragOriginX = 0, dragOriginY = 0, dragDisplacement = 0, focusDragging = false
       const focusBinding = pane.addBinding(params, 'focusT', { min: 0, max: 1, step: 0.0001, label: 'focus' })
       focusBinding.on('change', () => { if (!focusDragging) updateFocus(rt) })
-      canvas.addEventListener('pointerdown', (e) => { if (e.button === 2) { dragging = true; focusDragging = true; dragOriginX = e.clientX; dragDisplacement = 0; e.preventDefault() } })
-      canvas.addEventListener('pointermove', (e) => { if (dragging) dragDisplacement = (e.clientX - dragOriginX) * 0.01 })
+      canvas.addEventListener('pointerdown', (e) => { if (e.button === 2) { dragging = true; focusDragging = true; dragOriginX = e.clientX; dragOriginY = e.clientY; dragDisplacement = 0; e.preventDefault() } })
+      canvas.addEventListener('pointermove', (e) => {
+        if (!dragging) return
+        const dy = -(e.clientY - dragOriginY) * 0.01  // up = forward (positive)
+        const dx = (e.clientX - dragOriginX) * 0.005   // right = forward at half speed
+        dragDisplacement = dy + dx
+      })
       const stopDrag = () => { dragging = false; focusDragging = false }
       canvas.addEventListener('pointerup', stopDrag); canvas.addEventListener('pointercancel', stopDrag)
       canvas.addEventListener('contextmenu', (e) => e.preventDefault())
