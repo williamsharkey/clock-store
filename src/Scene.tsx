@@ -408,19 +408,13 @@ export default function Scene() {
       const markerSegs = new THREE.LineSegments(markerGeom, new THREE.LineBasicMaterial({ vertexColors: true }))
       markerSegs.frustumCulled = false; scene.add(markerSegs)
 
-      // Focus indicator line (always red)
-      const focusPosArr = new Float32Array(2 * 3)
-      const focusPosAttr = new THREE.BufferAttribute(focusPosArr, 3)
-      const focusGeom = new THREE.BufferGeometry(); focusGeom.setAttribute('position', focusPosAttr)
-      const focusSegs = new THREE.LineSegments(focusGeom, new THREE.LineBasicMaterial({ color: 0xff4444 }))
-      focusSegs.frustumCulled = false; scene.add(focusSegs)
 
       function eventWindowYears(level: number): number {
         return level === 0 ? 3000 : level === 1 ? 500 : level === 2 ? 50 : level === 3 ? 5 : 0.5
       }
 
       // ── Events ────────────────────────────────────────────────────────────
-      interface CoilEvent { name: string; t: number; level: number; color: string }
+      interface CoilEvent { name: string; t: number; level: number; color: string; tMin?: number; tMax?: number }
 
       function yearToT(year: number): number { return (year - START_YEAR) / TOTAL_YEARS }
       function dateToT(dateStr: string): number {
@@ -463,16 +457,16 @@ export default function Scene() {
         { name: 'Athenian democracy established', t: yearToT(-508), level: 1, color: '#4d96ff' },
         // Ionian Revolt (499–493 BCE) — level 2 summary, level 3 details
         { name: 'Ionian Revolt begins', t: yearToT(-499), level: 2, color: '#6bcb77' },
-        { name: 'Aristagoras appeals to Athens', t: dateToT('-0499-01-15'), level: 3, color: '#6bcb77' },
-        { name: 'Greeks burn Sardis', t: dateToT('-0498-06-01'), level: 3, color: '#e74c3c' },
-        { name: 'Battle of Ephesus', t: dateToT('-0498-09-01'), level: 3, color: '#e74c3c' },
-        { name: 'Cyprus joins revolt', t: dateToT('-0497-03-01'), level: 3, color: '#6bcb77' },
-        { name: 'Battle of Salamis (Cyprus)', t: dateToT('-0497-07-01'), level: 3, color: '#e74c3c' },
-        { name: 'Carians defeated at Marsyas', t: dateToT('-0497-10-01'), level: 3, color: '#e74c3c' },
-        { name: 'Aristagoras killed in Thrace', t: dateToT('-0496-04-01'), level: 3, color: '#e74c3c' },
-        { name: 'Persian siege of Miletus begins', t: dateToT('-0494-06-01'), level: 3, color: '#e74c3c' },
-        { name: 'Battle of Lade', t: dateToT('-0494-08-01'), level: 3, color: '#e74c3c' },
-        { name: 'Fall of Miletus', t: dateToT('-0494-10-01'), level: 3, color: '#e74c3c' },
+        { name: 'Aristagoras appeals to Athens', t: dateToT('-0499-01-15'), level: 3, color: '#6bcb77', tMin: dateToT('-0499-03-01'), tMax: dateToT('-0498-11-01') },
+        { name: 'Greeks burn Sardis', t: dateToT('-0498-06-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0498-04-01'), tMax: dateToT('-0498-08-01') },
+        { name: 'Battle of Ephesus', t: dateToT('-0498-09-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0498-06-01'), tMax: dateToT('-0498-12-01') },
+        { name: 'Cyprus joins revolt', t: dateToT('-0497-03-01'), level: 3, color: '#6bcb77', tMin: dateToT('-0498-01-01'), tMax: dateToT('-0497-06-01') },
+        { name: 'Battle of Salamis (Cyprus)', t: dateToT('-0497-07-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0497-05-01'), tMax: dateToT('-0497-09-01') },
+        { name: 'Carians defeated at Marsyas', t: dateToT('-0497-10-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0497-06-01'), tMax: dateToT('-0496-02-01') },
+        { name: 'Aristagoras killed in Thrace', t: yearToT(-497), level: 3, color: '#e74c3c', tMin: yearToT(-497), tMax: yearToT(-496) },
+        { name: 'Persian siege of Miletus begins', t: dateToT('-0494-06-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0494-04-01'), tMax: dateToT('-0494-08-01') },
+        { name: 'Battle of Lade', t: dateToT('-0494-08-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0494-07-01'), tMax: dateToT('-0494-09-01') },
+        { name: 'Fall of Miletus', t: dateToT('-0494-10-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0494-09-01'), tMax: dateToT('-0494-12-01') },
         { name: 'Ionian Revolt ends', t: yearToT(-493), level: 2, color: '#e74c3c' },
         { name: 'Battle of Marathon', t: yearToT(-490), level: 1, color: '#6bcb77' },
         { name: 'Battle of Thermopylae', t: yearToT(-480), level: 1, color: '#6bcb77' },
@@ -488,7 +482,10 @@ export default function Scene() {
         { name: 'Augustus becomes Emperor', t: yearToT(-27), level: 1, color: '#ff6b6b' },
         { name: 'Cleopatra dies', t: yearToT(-30), level: 1, color: '#e74c3c' },
         { name: 'Jesus of Nazareth born', t: yearToT(-4), level: 0, color: '#9b59b6' },
-        { name: 'Eruption of Vesuvius', t: dateToT('0079-08-24'), level: 1, color: '#e74c3c' },
+        { name: 'Eruption of Vesuvius', t: dateToT('0079-10-24'), level: 1, color: '#e74c3c', tMin: dateToT('0079-08-24'), tMax: dateToT('0079-10-24') },
+        { name: 'Vesuvius: Plinian column erupts (~1 PM)', t: dateToT('0079-10-24T13:00'), level: 3, color: '#e74c3c', tMin: dateToT('0079-08-24T13:00'), tMax: dateToT('0079-10-24T13:00') },
+        { name: 'Vesuvius: first pyroclastic surge (~1 AM)', t: dateToT('0079-10-25T01:00'), level: 3, color: '#e74c3c', tMin: dateToT('0079-08-25T01:00'), tMax: dateToT('0079-10-25T01:00') },
+        { name: 'Pompeii buried', t: dateToT('0079-10-25T07:00'), level: 3, color: '#e74c3c', tMin: dateToT('0079-08-25T07:00'), tMax: dateToT('0079-10-25T07:00') },
         { name: 'Colosseum completed', t: yearToT(80), level: 1, color: '#ffd93d' },
         // Late antiquity & early medieval
         { name: 'Constantine converts to Christianity', t: yearToT(312), level: 1, color: '#9b59b6' },
@@ -578,12 +575,14 @@ export default function Scene() {
       }
 
       // Fixed focus label + connecting line on the right side
+      const focusChevron = document.createElement('div')
+      focusChevron.innerHTML = '<svg width="28" height="20" viewBox="0 0 28 20"><path d="M28,0 L6,10 L28,20 L22,10 Z" fill="#ff4444"/></svg>'
+      focusChevron.style.cssText = 'position:absolute;pointer-events:none;transform:translate(-100%,-50%);line-height:0'
+      let chevronX = -1, chevronY = -1
+      overlay.appendChild(focusChevron)
       const focusLabelDiv = document.createElement('div')
       focusLabelDiv.style.cssText = 'position:absolute;right:20px;font-family:monospace;color:#ff4444;font-size:14px;font-weight:bold;pointer-events:none;white-space:nowrap;transform:translateY(-50%)'
       overlay.appendChild(focusLabelDiv)
-      const focusLineDiv = document.createElement('div')
-      focusLineDiv.style.cssText = 'position:absolute;height:1px;background:#ff4444;pointer-events:none'
-      overlay.appendChild(focusLineDiv)
       let poolIdx = 0
       const _projVec = new THREE.Vector3()
 
@@ -808,10 +807,45 @@ export default function Scene() {
 
       // ── Minimap timeline ─────────────────────────────────────────────────
       const minimap = document.createElement('div')
-      minimap.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:90%;height:28px;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:4px;z-index:10;overflow:hidden'
+      minimap.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:90%;height:28px;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:4px;z-index:10;overflow:visible'
       const miniCanvas = document.createElement('canvas')
-      miniCanvas.style.cssText = 'width:100%;height:100%'
+      miniCanvas.style.cssText = 'width:100%;height:100%;cursor:default'
       minimap.appendChild(miniCanvas)
+      const miniTooltip = document.createElement('div')
+      miniTooltip.style.cssText = 'position:absolute;bottom:100%;left:0;margin-bottom:4px;font-family:monospace;font-size:11px;padding:2px 6px;background:rgba(17,17,17,0.95);border:1px solid #444;border-radius:4px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity 0.1s;transform:translateX(-50%)'
+      minimap.appendChild(miniTooltip)
+      // Hit-test data: updated each frame
+      const miniDots: { px: number; py: number; ev: CoilEvent }[] = []
+      let miniHovered: CoilEvent | null = null
+      minimap.addEventListener('mousemove', (e) => {
+        const rect = minimap.getBoundingClientRect()
+        const mx = (e.clientX - rect.left) * devicePixelRatio
+        const my = (e.clientY - rect.top) * devicePixelRatio
+        let best: CoilEvent | null = null, bestDist = 12 * devicePixelRatio
+        for (const d of miniDots) {
+          const dx = mx - d.px, dy = my - d.py
+          const dist = Math.sqrt(dx * dx + dy * dy)
+          if (dist < bestDist) { bestDist = dist; best = d.ev }
+        }
+        miniHovered = best
+        miniCanvas.style.cursor = best ? 'pointer' : 'default'
+        if (best) {
+          miniTooltip.textContent = best.name
+          miniTooltip.style.color = best.color
+          miniTooltip.style.left = `${(e.clientX - rect.left)}px`
+          miniTooltip.style.opacity = '1'
+        } else {
+          miniTooltip.style.opacity = '0'
+        }
+      })
+      minimap.addEventListener('mouseleave', () => { miniHovered = null; miniTooltip.style.opacity = '0'; miniCanvas.style.cursor = 'default' })
+      minimap.addEventListener('click', () => {
+        if (miniHovered) {
+          const evLevel = miniHovered.level
+          const targetLevel = Math.min(evLevel, cameraLevel)
+          animateToT(miniHovered.t, targetLevel)
+        }
+      })
       canvas.parentElement!.appendChild(minimap)
 
       const K_WARP = 3 // exponential compression factor
@@ -865,6 +899,7 @@ export default function Scene() {
         }
 
         // Events
+        miniDots.length = 0
         for (const ev of events) {
           const evYr = START_YEAR + ev.t * TOTAL_YEARS
           const px = yearToMiniPx(evYr, focusYr, halfW, halfRange)
@@ -874,10 +909,10 @@ export default function Scene() {
           ctx.globalAlpha = 0.9
           const bandCenter = 0.25 + ev.level * (0.5 / 3)
           const bandHalf = 0.06
-          // Deterministic random per event index
           const hash = Math.sin(ev.t * 127.1 + ev.level * 311.7) * 43758.5453 % 1
           const dotY = h * (bandCenter + (hash - 0.5) * bandHalf * 2)
           ctx.beginPath(); ctx.arc(px, dotY, r * devicePixelRatio, 0, Math.PI * 2); ctx.fill()
+          miniDots.push({ px, py: dotY, ev })
         }
         ctx.globalAlpha = 1
 
@@ -1059,7 +1094,7 @@ export default function Scene() {
         let markerIdx = 0
 
         // ── Events (always write line segments; collect labels for de-overlap) ─
-        const eventLabels: { scrX: number; scrY: number; opacity: number; ev: CoilEvent; anchorY: number }[] = []
+        const eventLabels: { scrX: number; scrY: number; opacity: number; ev: CoilEvent; anchorY: number; right: boolean }[] = []
         for (let i = 0; i < events.length; i++) {
           const ev = events[i]
           const evYear = START_YEAR + ev.t * TOTAL_YEARS
@@ -1070,30 +1105,22 @@ export default function Scene() {
 
           evalCoil(ev.t, ev.level, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _mp)
           const sx = _mp.x - origin.x, sy = _mp.y - origin.y, sz = _mp.z - origin.z
-          const j = markerIdx * 6
-          markerPosArr[j] = sx; markerPosArr[j+1] = sy; markerPosArr[j+2] = sz
-          markerPosArr[j+3] = sx - 0.2 * _camRight.x
-          markerPosArr[j+4] = sy - 0.2 * _camRight.y
-          markerPosArr[j+5] = sz - 0.2 * _camRight.z
-          const rgb = eventRGB[i]
-          markerColArr[j] = markerColArr[j+3] = rgb[0]
-          markerColArr[j+1] = markerColArr[j+4] = rgb[1]
-          markerColArr[j+2] = markerColArr[j+5] = rgb[2]
-          markerIdx++
 
           const fadeStart = evWindow === Infinity ? Infinity : evWindow * 0.7
           const opacity = evWindow === Infinity ? 1.0
             : temporalDist < fadeStart ? 1.0
             : 1.0 - (temporalDist - fadeStart) / (evWindow - fadeStart)
 
-          const ex = sx - 0.2 * _camRight.x, ey = sy - 0.2 * _camRight.y, ez = sz - 0.2 * _camRight.z
+          const labelOff = viewDistForLevel(cameraLevel) * 0.08
+          const side = ev.level >= 3 ? 1 : -1 // day+ events on right, others on left
+          const ex = sx + side * labelOff * _camRight.x, ey = sy + side * labelOff * _camRight.y, ez = sz + side * labelOff * _camRight.z
           _projVec.set(ex, ey, ez).project(rt.camera)
           if (_projVec.z > 1) continue
           const scrX = (_projVec.x * 0.5 + 0.5) * sw
           const scrY = (-_projVec.y * 0.5 + 0.5) * sh
           if (scrX < -200 || scrX > sw + 200 || scrY < -50 || scrY > sh + 50) continue
 
-          eventLabels.push({ scrX, scrY, opacity, ev, anchorY: scrY })
+          eventLabels.push({ scrX, scrY, opacity, ev, anchorY: scrY, right: ev.level >= 3 })
         }
 
         // De-overlap: sort by screen Y, push overlapping labels downward
@@ -1119,65 +1146,32 @@ export default function Scene() {
           div.style.opacity = String(Math.max(0.3, lbl.opacity))
           div.style.color = lbl.ev.color
           div.style.fontWeight = 'bold'
-          div.style.textAlign = 'right'
-          div.style.transform = 'translate(-100%, -100%)'
+          div.style.textAlign = lbl.right ? 'left' : 'right'
+          div.style.transform = lbl.right ? 'translateY(-100%)' : 'translate(-100%, -100%)'
           div.style.pointerEvents = 'auto'
           div.style.cursor = 'pointer'
           div.dataset.eventT = String(lbl.ev.t)
           div.dataset.eventLevel = String(lbl.ev.level)
         }
 
-        // ── Marker tiers (line segments only, no text labels) ──────────────
-        for (const tier of LABEL_TIERS) {
-          if (camLvl < tier.minCamLvl) continue
-          const wndStart = tier.windowYears === Infinity ? START_YEAR : Math.max(START_YEAR, focusYear - tier.windowYears)
-          const wndEnd = tier.windowYears === Infinity ? END_YEAR : Math.min(END_YEAR, focusYear + tier.windowYears)
-          const halfSteps = Math.min(80, tier.windowYears === Infinity ? 200 : Math.ceil(tier.windowYears / tier.yearStep))
-          const iterStart = Math.max(wndStart, focusYear - halfSteps * tier.yearStep)
-          const iterEnd = Math.min(wndEnd, focusYear + halfSteps * tier.yearStep)
-          const firstYear = Math.ceil(iterStart / tier.yearStep) * tier.yearStep
-
-          for (let year = firstYear; year <= iterEnd; year += tier.yearStep) {
-            if (tier.skipEvery > 0 && Math.abs(year - Math.round(year / tier.skipEvery) * tier.skipEvery) < tier.yearStep * 0.01) continue
-            if (markerIdx >= MAX_MARKERS) break
-
-            const t = (year - START_YEAR) / TOTAL_YEARS
-            evalCoil(t, tier.coilLevel, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _mp)
-            const sx = _mp.x - origin.x, sy = _mp.y - origin.y, sz = _mp.z - origin.z
-            const j = markerIdx * 6
-            markerPosArr[j] = sx; markerPosArr[j+1] = sy; markerPosArr[j+2] = sz
-            markerPosArr[j+3] = sx + tier.lineLen * _camRight.x
-            markerPosArr[j+4] = sy + tier.lineLen * _camRight.y
-            markerPosArr[j+5] = sz + tier.lineLen * _camRight.z
-            markerColArr[j] = markerColArr[j+3] = 1
-            markerColArr[j+1] = markerColArr[j+4] = 1
-            markerColArr[j+2] = markerColArr[j+5] = 1
-            markerIdx++
-          }
-        }
 
         // ── Focus indicator ────────────────────────────────────────────────
         {
-          evalCoil(params.focusT, camLvl, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _mp)
-          const fx = _mp.x - origin.x, fy = _mp.y - origin.y, fz = _mp.z - origin.z
-          focusPosArr[0] = fx; focusPosArr[1] = fy; focusPosArr[2] = fz
-          focusPosArr[3] = fx + 0.1 * _camRight.x
-          focusPosArr[4] = fy + 0.1 * _camRight.y
-          focusPosArr[5] = fz + 0.1 * _camRight.z
-          focusPosAttr.needsUpdate = true
-
+          // Use _pos from cameraFrame (already interpolated for fractional levels)
+          cameraFrame(params.focusT)
+          const fx = _pos.x - origin.x, fy = _pos.y - origin.y, fz = _pos.z - origin.z
+          // Project coil point, then offset right in screen space
           _projVec.set(fx, fy, fz).project(rt.camera)
-          const fScrX = (_projVec.x * 0.5 + 0.5) * sw
+          const fScrX = (_projVec.x * 0.5 + 0.5) * sw + 20
           const fScrY = (-_projVec.y * 0.5 + 0.5) * sh
+          if (chevronX < 0) { chevronX = fScrX; chevronY = fScrY }
+          chevronX += (fScrX - chevronX) * 0.15
+          chevronY += (fScrY - chevronY) * 0.15
+          focusChevron.style.left = `${chevronX}px`
+          focusChevron.style.top = `${chevronY}px`
           const labelY = Math.max(20, Math.min(sh - 20, fScrY))
           focusLabelDiv.textContent = focusTToDate(params.focusT)
           focusLabelDiv.style.top = `${labelY}px`
-          const labelX = sw - 20 - focusLabelDiv.offsetWidth
-          const lineLeft = Math.min(fScrX, labelX)
-          const lineWidth = Math.abs(labelX - fScrX)
-          focusLineDiv.style.left = `${lineLeft}px`
-          focusLineDiv.style.top = `${labelY}px`
-          focusLineDiv.style.width = `${lineWidth}px`
         }
 
         markerGeom.setDrawRange(0, markerIdx * 2)
