@@ -498,8 +498,8 @@ export default function Scene() {
       canvas.addEventListener('pointerdown', (e) => { if (e.button === 2) { dragging = true; focusDragging = true; dragOriginX = e.clientX; dragOriginY = e.clientY; dragDisplacement = 0; e.preventDefault() } })
       canvas.addEventListener('pointermove', (e) => {
         if (!dragging) return
-        const dy = -(e.clientY - dragOriginY) * 0.01  // up = forward (positive)
-        const dx = (e.clientX - dragOriginX) * 0.005   // right = forward at half speed
+        const dy = (e.clientY - dragOriginY) * 0.01   // up = forward
+        const dx = -(e.clientX - dragOriginX) * 0.005  // right = forward at half speed
         dragDisplacement = dy + dx
       })
       const stopDrag = () => { dragging = false; focusDragging = false }
