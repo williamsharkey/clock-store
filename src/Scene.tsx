@@ -238,12 +238,31 @@ export default function Scene() {
     // so all geometry stays near (0,0,0) where Float32 is most precise.
     const origin = { x: 0, y: 0, z: 0 }
 
+    let prevOriginT = -1
+    let originBlend = 1.0 // 1 = follow helix exactly, 0 = follow Y axis (no wobble)
     function computeOrigin() {
       const hc = getHelixConsts()
       const theta = params.focusT * hc.omega
-      origin.x = hc.R * Math.cos(theta)
+      const helixX = hc.R * Math.cos(theta)
+      const helixZ = hc.R * Math.sin(theta)
       origin.y = (params.focusT - 0.5) * hc.L
-      origin.z = hc.R * Math.sin(theta)
+
+      if (prevOriginT < 0) {
+        origin.x = helixX; origin.z = helixZ
+        prevOriginT = params.focusT
+        return
+      }
+
+      const dt = Math.abs(params.focusT - prevOriginT)
+      const turnsPerFrame = dt * CENTURY_TURNS
+      prevOriginT = params.focusT
+
+      // Blend target: slow → 1 (helix), fast → 0 (Y axis)
+      const target = turnsPerFrame < 0.001 ? 1.0 : Math.max(0, 1.0 - turnsPerFrame * 20)
+      originBlend += (target - originBlend) * 0.08
+
+      origin.x = helixX * originBlend
+      origin.z = helixZ * originBlend
     }
 
     function dispatchCompute(rt: Runtime) {
@@ -278,11 +297,17 @@ export default function Scene() {
 
     function positionCamera(rt: Runtime) {
       cameraFrame(params.focusT)
-      _ufP2.set(_pos.x - origin.x, _pos.y - origin.y, _pos.z - origin.z)
+      const hc = getHelixConsts()
+      const theta = params.focusT * hc.omega
+      // Camera target = sub-coil offset from the century helix.
+      // Strips out the helical X/Z oscillation — at level 0 this is (0,0,0).
+      _ufP2.x = _pos.x - hc.R * Math.cos(theta)
+      _ufP2.y = _pos.y - origin.y
+      _ufP2.z = _pos.z - hc.R * Math.sin(theta)
+
       const dist = viewDistForLevel(cameraLevel)
 
       if (!cameraInitialized) {
-        // First call: set ideal starting angle
         const tilt = 0.25
         rt.camera.position.copy(_ufP2)
           .addScaledVector(_rN, dist * Math.cos(tilt))
@@ -291,7 +316,6 @@ export default function Scene() {
         rt.controls.target.copy(_ufP2)
         cameraInitialized = true
       } else {
-        // Preserve user's orbit angle, update target + distance
         _camDir.copy(rt.camera.position).sub(rt.controls.target)
         const curDist = _camDir.length()
         if (curDist > 0.0001) _camDir.multiplyScalar(dist / curDist)
@@ -492,17 +516,92 @@ export default function Scene() {
         zoomTarget = THREE.MathUtils.clamp(zoomTarget + step, 0, HIERARCHY.length - 1)
       }, { passive: false })
 
-      let dragging = false, dragOriginX = 0, dragOriginY = 0, dragDisplacement = 0, focusDragging = false
+      let dragging = false, dragOriginX = 0, dragOriginY = 0, dragCurX = 0, dragCurY = 0, dragDisplacement = 0, focusDragging = false
+      let panInertia = 0
       const focusBinding = pane.addBinding(params, 'focusT', { min: 0, max: 1, step: 0.0001, label: 'focus' })
       focusBinding.on('change', () => { if (!focusDragging) updateFocus(rt) })
-      canvas.addEventListener('pointerdown', (e) => { if (e.button === 2) { dragging = true; focusDragging = true; dragOriginX = e.clientX; dragOriginY = e.clientY; dragDisplacement = 0; e.preventDefault() } })
+
+      // ── Pan indicator widget ─────────────────────────────────────────────
+      const panWidget = document.createElement('div')
+      panWidget.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;z-index:5'
+      const panSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
+      panSvg.setAttribute('width', '100%'); panSvg.setAttribute('height', '100%')
+      panSvg.style.cssText = 'position:absolute;top:0;left:0'
+      panWidget.appendChild(panSvg)
+      const panLabel = document.createElement('div')
+      panLabel.style.cssText = 'position:absolute;font-family:monospace;font-size:11px;color:#ccc;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:4px;padding:2px 6px;white-space:nowrap;transform:translate(-50%,-100%);margin-top:-12px'
+      panWidget.appendChild(panLabel)
+      canvas.parentElement!.appendChild(panWidget)
+
+      function formatPanRate(yearsPerSec: number): string {
+        const abs = Math.abs(yearsPerSec)
+        if (abs < 1e-6) return '0'
+        if (abs < 1 / 8766) return `${(abs * 8766 * 60).toFixed(1)} min/s`
+        if (abs < 1 / 365.25) return `${(abs * 8766).toFixed(1)} hr/s`
+        if (abs < 1) return `${(abs * 365.25).toFixed(1)} day/s`
+        if (abs < 100) return `${abs.toFixed(1)} yr/s`
+        if (abs < 10000) return `${(abs / 100).toFixed(1)} c/s`
+        return `${(abs / 1000).toFixed(0)}k yr/s`
+      }
+
+      function updatePanWidget() {
+        if (!dragging) { panWidget.style.display = 'none'; return }
+        panWidget.style.display = 'block'
+        const ox = dragOriginX, oy = dragOriginY, cx = dragCurX, cy = dragCurY
+        const ddx = cx - ox, ddy = cy - oy
+        const dist = Math.sqrt(ddx * ddx + ddy * ddy)
+
+        // Compute actual pan rate in years/second (~60fps)
+        const totals = getCachedTotals()
+        const panLvl = Math.min(Math.round(cameraLevel), totals.length - 1)
+        const dtPerFrame = dragDisplacement * params.panSpeed / totals[panLvl] * TOTAL_YEARS
+        const yearsPerSec = dtPerFrame * 60
+        const dir = yearsPerSec > 0.0001 ? ' ◀' : yearsPerSec < -0.0001 ? ' ▶' : ''
+        panLabel.textContent = formatPanRate(yearsPerSec) + dir
+        panLabel.style.left = `${ox}px`
+        panLabel.style.top = `${oy}px`
+
+        // Build SVG: origin dot, line, spaced dots
+        let svg = `<circle cx="${ox}" cy="${oy}" r="4" fill="#888" stroke="#444" stroke-width="1"/>`
+        if (dist > 5) {
+          svg += `<line x1="${ox}" y1="${oy}" x2="${cx}" y2="${cy}" stroke="#555" stroke-width="1" stroke-dasharray="4,3"/>`
+          const nx = ddx / dist, ny = ddy / dist
+          let pos = 8
+          let gap = 8
+          while (pos < dist - 4) {
+            const dotX = ox + nx * pos, dotY = oy + ny * pos
+            svg += `<circle cx="${dotX}" cy="${dotY}" r="2" fill="rgba(200,200,200,0.5)"/>`
+            pos += gap
+            gap += 2
+          }
+          svg += `<circle cx="${cx}" cy="${cy}" r="3" fill="#aaa" stroke="#555" stroke-width="1"/>`
+        }
+        panSvg.innerHTML = svg
+      }
+
+      canvas.addEventListener('pointerdown', (e) => {
+        if (e.button !== 2) return
+        dragging = true; focusDragging = true
+        dragOriginX = e.clientX; dragOriginY = e.clientY
+        dragCurX = e.clientX; dragCurY = e.clientY; dragDisplacement = 0
+        canvas.requestPointerLock()
+        e.preventDefault()
+      })
       canvas.addEventListener('pointermove', (e) => {
         if (!dragging) return
-        const dy = (e.clientY - dragOriginY) * 0.01   // up = forward
-        const dx = -(e.clientX - dragOriginX) * 0.005  // right = forward at half speed
+        dragCurX += e.movementX; dragCurY += e.movementY
+        const dy = (dragCurY - dragOriginY) * 0.01   // up = forward
+        const dx = -(dragCurX - dragOriginX) * 0.005  // right = forward at half speed
         dragDisplacement = dy + dx
+        updatePanWidget()
       })
-      const stopDrag = () => { dragging = false; focusDragging = false }
+      const stopDrag = () => {
+        if (dragging) {
+          panInertia = dragDisplacement
+          if (document.pointerLockElement === canvas) document.exitPointerLock()
+        }
+        dragging = false; focusDragging = false; updatePanWidget()
+      }
       canvas.addEventListener('pointerup', stopDrag); canvas.addEventListener('pointercancel', stopDrag)
       canvas.addEventListener('contextmenu', (e) => e.preventDefault())
 
@@ -649,6 +748,7 @@ export default function Scene() {
 
       function animateToT(targetT: number, targetLevel?: number) {
         animating = true
+
         animStartT = params.focusT
         animEndT = targetT
         animStartLevel = cameraLevel
@@ -663,10 +763,10 @@ export default function Scene() {
         // Duration: scale with log-distance + level change
         if (temporalDistYears < 0.01) {
           // Level-only change
-          animDuration = 300 + levelDist * 200
+          animDuration = 400 + levelDist * 250
         } else {
           const logDist = Math.log10(Math.max(1, temporalDistYears))
-          animDuration = 400 + logDist * 300 + levelDist * 150
+          animDuration = 600 + logDist * 500 + levelDist * 200
         }
         animDuration = Math.max(300, Math.min(2500, animDuration))
 
@@ -699,10 +799,12 @@ export default function Scene() {
           cameraLevel = baseLvl - zoomOut * Math.sin(progress * Math.PI)
 
           updateFocus(rt)
+
           updateLevelHighlight()
           updatePlayBtn()
           if (progress >= 1) {
             animating = false
+
             zoomTarget = cameraLevel
             if (animReturnLevel !== null) {
               const retLvl = animReturnLevel
@@ -717,6 +819,12 @@ export default function Scene() {
           const totals = getCachedTotals()
           const panLvl = Math.min(Math.round(cameraLevel), totals.length - 1)
           params.focusT = THREE.MathUtils.clamp(params.focusT - dragDisplacement * params.panSpeed / totals[panLvl], 0, 1)
+          updateFocus(rt)
+        } else if (!dragging && Math.abs(panInertia) > 0.0001) {
+          const totals = getCachedTotals()
+          const panLvl = Math.min(Math.round(cameraLevel), totals.length - 1)
+          params.focusT = THREE.MathUtils.clamp(params.focusT - panInertia * params.panSpeed / totals[panLvl], 0, 1)
+          panInertia *= 0.92
           updateFocus(rt)
         }
 
