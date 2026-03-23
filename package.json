@@ -1,27 +1,30 @@
 {
-  "name": "time-helix",
+  "name": "clock-store",
   "private": true,
-  "version": "0.1.0",
-  "description": "Interactive fractal coil calendar visualization using WebGPU",
+  "version": "0.2.0",
+  "description": "Low-poly clock ride with barf bags and multiplayer sync",
   "type": "module",
   "scripts": {
     "dev": "vite",
     "build": "tsc -b && vite build",
-    "preview": "vite preview"
+    "preview": "vite preview",
+    "gateway": "node server/gateway.mjs",
+    "dev:all": "concurrently -k -n app,gateway \"npm run dev\" \"npm run gateway\""
   },
   "dependencies": {
-    "@tweakpane/core": "^2.0.5",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",
+    "satellite.js": "^6.0.1",
     "three": "^0.181.1",
-    "tweakpane": "^4.0.5"
+    "ws": "^8.18.3"
   },
   "devDependencies": {
     "@vitejs/plugin-react": "^4.6.0",
-    "vite": "^7.0.4",
-    "typescript": "~5.8.3",
     "@types/three": "^0.181.0",
     "@types/react": "^19.1.8",
-    "@types/react-dom": "^19.1.6"
+    "@types/react-dom": "^19.1.6",
+    "concurrently": "^9.2.1",
+    "typescript": "~5.8.3",
+    "vite": "^7.0.4"
   }
 }

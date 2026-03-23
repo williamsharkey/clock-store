@@ -1,1407 +1,1350 @@
-import { useEffect, useRef } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import * as THREE from 'three'
-import { WebGPURenderer } from 'three/webgpu'
-import {
-  Fn, instanceIndex, attributeArray, uniform,
-  float, vec3, cos, sin, sqrt, fract,
-} from 'three/tsl'
-import { OrbitControls } from 'three/examples/jsm/controls/OrbitControls.js'
-import { Pane } from 'tweakpane'
+import { BARF_FACTS } from './barfFacts.ts'
+import { CONTINENT_LOOPS } from './earthContours.ts'
 
-const HIERARCHY = [
-  { name: 'century', turnsPerParent: 1,   spt: 32 },
-  { name: 'decade',  turnsPerParent: 10,  spt: 32 },
-  { name: 'year',    turnsPerParent: 10,  spt: 32 },
-  { name: 'day',     turnsPerParent: 365, spt: 32 },
-  { name: 'hour',    turnsPerParent: 24,  spt: 16 },
-  { name: 'minute',  turnsPerParent: 60,  spt: 16 },
-  { name: 'second',  turnsPerParent: 60,  spt: 32 },
-]
-const WINDOW = 120
-const TAU = Math.PI * 2
+const LINE_COLOR = 0x42ff6b
+const EARTH_RADIUS = 8.5
+const EARTH_KM = 6371
+const STORE_POS = new THREE.Vector3(-18, 0, 0)
+const CLERK_POS = new THREE.Vector3(-12, 0, 5)
+const EARTH_POS = new THREE.Vector3(10, 12, 0)
+const CAMERA_LERP = 0.08
 
-// ── CPU evalCoil ─────────────────────────────────────────────────────────────
-function evalCoil(
-  t: number, maxLevel: number,
-  totals: number[], offsets: number[],
-  R: number, L: number, omega: number, tMag: number,
-  outPos: { x: number; y: number; z: number },
-  outN?: { x: number; y: number; z: number },
-  outB?: { x: number; y: number; z: number },
-) {
-  const theta = t * omega
-  const cT = Math.cos(theta), sT = Math.sin(theta)
-  let px = R * cT, py = (t - 0.5) * L, pz = R * sT
-  let nx = -cT, ny = 0, nz = -sT
-  let bx = -L * sT / tMag, by = -R * omega / tMag, bz = L * cT / tMag
-  let dtx = -R * omega * sT, dty = L, dtz = R * omega * cT
+type StageId =
+  | 'arrival'
+  | 'clerk'
+  | 'satellites'
+  | 'planets'
+  | 'ride'
+  | 'riders'
+  | 'heresy'
 
-  for (let lvl = 1; lvl <= maxLevel; lvl++) {
-    const alpha = t * totals[lvl] * TAU
-    const cA = Math.cos(alpha), sA = Math.sin(alpha)
-    const off = offsets[lvl]
-    const dx = cA * nx + sA * bx, dy = cA * ny + sA * by, dz = cA * nz + sA * bz
-    const ex = -sA * nx + cA * bx, ey = -sA * ny + cA * by, ez = -sA * nz + cA * bz
-    px += off * dx; py += off * dy; pz += off * dz
-    const w = off * totals[lvl] * TAU
-    dtx += w * ex; dty += w * ey; dtz += w * ez
-    const tLen = Math.sqrt(dtx * dtx + dty * dty + dtz * dtz)
-    const tx = dtx / tLen, ty = dty / tLen, tz = dtz / tLen
-    const dot = dx * tx + dy * ty + dz * tz
-    let nnx = dx - dot * tx, nny = dy - dot * ty, nnz = dz - dot * tz
-    const nLen = Math.sqrt(nnx * nnx + nny * nny + nnz * nnz)
-    nnx /= nLen; nny /= nLen; nnz /= nLen
-    nx = nnx; ny = nny; nz = nnz
-    bx = ty * nnz - tz * nny; by = tz * nnx - tx * nnz; bz = tx * nny - ty * nnx
+type SatelliteFocus = 'fleets' | 'junk' | 'all'
+type PlanetFocus = 'moon' | 'outer' | 'all'
+
+interface StoryState {
+  stage: StageId
+  hasBag: boolean
+  satelliteFocus: SatelliteFocus
+  planetFocus: PlanetFocus
+}
+
+interface StageCard {
+  copy: string
+  choices: [string, string, string]
+}
+
+type Vec3Tuple = [number, number, number]
+
+interface SpaceObject {
+  name?: string
+  position: Vec3Tuple
+  trail: Vec3Tuple[]
+}
+
+interface SatelliteCategory {
+  key: string
+  label: string
+  total: number
+  rendered: number
+  objects: SpaceObject[]
+}
+
+interface SpaceBody {
+  key: string
+  label: string
+  position: Vec3Tuple | null
+  trail: Vec3Tuple[]
+}
+
+interface SpacePayload {
+  generatedAt: string
+  satellites: SatelliteCategory[]
+  bodies: SpaceBody[]
+}
+
+interface RemotePlayerState {
+  id: string
+  faceSeed: number
+  position: Vec3Tuple
+  yaw: number
+  boarded: boolean
+  stage?: string
+}
+
+interface RemoteAvatar {
+  group: THREE.Group
+  targetPosition: THREE.Vector3
+  yaw: number
+  boarded: boolean
+}
+
+interface BarfParticle {
+  position: THREE.Vector3
+  velocity: THREE.Vector3
+  life: number
+  size: number
+}
+
+const BARF_SEGMENTS_PER_PARTICLE = 4
+
+const INITIAL_STORY: StoryState = {
+  stage: 'arrival',
+  hasBag: false,
+  satelliteFocus: 'fleets',
+  planetFocus: 'moon',
+}
+
+function mulberry32(seed: number) {
+  let value = seed >>> 0
+  return () => {
+    value += 0x6d2b79f5
+    let t = value
+    t = Math.imul(t ^ (t >>> 15), t | 1)
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61)
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296
   }
-  outPos.x = px; outPos.y = py; outPos.z = pz
-  if (outN) { outN.x = nx; outN.y = ny; outN.z = nz }
-  if (outB) { outB.x = bx; outB.y = by; outB.z = bz }
 }
 
-// ── GPU compute ──────────────────────────────────────────────────────────────
-function createCoilCompute(
-  maxLevel: number, totalTurns: number[], maxPts: number,
-  offUniforms: ReturnType<typeof uniform>[],
-  tBaseU: ReturnType<typeof uniform>, tStepU: ReturnType<typeof uniform>,
-  baseFracUniforms: ReturnType<typeof uniform>[],
-  radiusU: ReturnType<typeof uniform>, lengthU: ReturnType<typeof uniform>,
-  omegaU: ReturnType<typeof uniform>, tmagU: ReturnType<typeof uniform>,
-  posBuf: ReturnType<typeof attributeArray>,
-) {
-  return Fn(() => {
-    const idx = instanceIndex
-    const t = tBaseU.add(tStepU.mul(idx.toFloat()))
-    const helixFrac = baseFracUniforms[0].add(tStepU.mul(float(totalTurns[0])).mul(idx.toFloat()))
-    const theta = fract(helixFrac).mul(float(TAU))
-    const cT = cos(theta), sT = sin(theta)
-    const px = radiusU.mul(cT).toVar('px')
-    const py = t.sub(0.5).mul(lengthU).toVar('py')
-    const pz = radiusU.mul(sT).toVar('pz')
-    const nx = cT.negate().toVar('nx'), ny = float(0).toVar('ny'), nz = sT.negate().toVar('nz')
-    const bx = lengthU.negate().mul(sT).div(tmagU).toVar('bx')
-    const by = radiusU.negate().mul(omegaU).div(tmagU).toVar('by')
-    const bz = lengthU.mul(cT).div(tmagU).toVar('bz')
-    for (let lvl = 1; lvl <= maxLevel; lvl++) {
-      const lvlFrac = baseFracUniforms[lvl].add(tStepU.mul(float(totalTurns[lvl])).mul(idx.toFloat()))
-      const alpha = fract(lvlFrac).mul(float(TAU))
-      const cA = cos(alpha), sA = sin(alpha)
-      const off = offUniforms[lvl]
-      const nnx = cA.mul(nx).add(sA.mul(bx)).toVar(`nnx${lvl}`)
-      const nny = cA.mul(ny).add(sA.mul(by)).toVar(`nny${lvl}`)
-      const nnz = cA.mul(nz).add(sA.mul(bz)).toVar(`nnz${lvl}`)
-      const nbx = sA.negate().mul(nx).add(cA.mul(bx)).toVar(`nbx${lvl}`)
-      const nby = sA.negate().mul(ny).add(cA.mul(by)).toVar(`nby${lvl}`)
-      const nbz = sA.negate().mul(nz).add(cA.mul(bz)).toVar(`nbz${lvl}`)
-      px.addAssign(off.mul(nnx)); py.addAssign(off.mul(nny)); pz.addAssign(off.mul(nnz))
-      nx.assign(nnx); ny.assign(nny); nz.assign(nnz)
-      bx.assign(nbx); by.assign(nby); bz.assign(nbz)
+function latLonToVector3(longitude: number, latitude: number, radius: number) {
+  const lat = THREE.MathUtils.degToRad(latitude)
+  const lon = THREE.MathUtils.degToRad(longitude)
+  const x = radius * Math.cos(lat) * Math.cos(lon)
+  const y = radius * Math.sin(lat)
+  const z = -radius * Math.cos(lat) * Math.sin(lon)
+  return new THREE.Vector3(x, y, z)
+}
+
+function buildLineFromPoints(points: THREE.Vector3[], closed = false, opacity = 1) {
+  const geometry = new THREE.BufferGeometry().setFromPoints(points)
+  const material = new THREE.LineBasicMaterial({
+    color: LINE_COLOR,
+    transparent: opacity < 1,
+    opacity,
+  })
+  return closed ? new THREE.LineLoop(geometry, material) : new THREE.Line(geometry, material)
+}
+
+function buildWireframe(geometry: THREE.BufferGeometry, opacity = 1) {
+  const wire = new THREE.WireframeGeometry(geometry)
+  return new THREE.LineSegments(
+    wire,
+    new THREE.LineBasicMaterial({
+      color: LINE_COLOR,
+      transparent: opacity < 1,
+      opacity,
+    }),
+  )
+}
+
+function buildCross(position: THREE.Vector3, size: number) {
+  const group = new THREE.Group()
+  const segments = [
+    [new THREE.Vector3(-size, 0, 0), new THREE.Vector3(size, 0, 0)],
+    [new THREE.Vector3(0, -size, 0), new THREE.Vector3(0, size, 0)],
+    [new THREE.Vector3(0, 0, -size), new THREE.Vector3(0, 0, size)],
+  ]
+
+  for (const [a, b] of segments) {
+    const line = buildLineFromPoints([a, b])
+    group.add(line)
+  }
+
+  group.position.copy(position)
+  return group
+}
+
+function buildOrbitRing(radius: number, tilt = 0, segments = 80) {
+  const points: THREE.Vector3[] = []
+  for (let index = 0; index < segments; index += 1) {
+    const angle = (index / segments) * Math.PI * 2
+    points.push(new THREE.Vector3(Math.cos(angle) * radius, 0, Math.sin(angle) * radius))
+  }
+  const ring = buildLineFromPoints(points, true, 0.35)
+  ring.rotation.x = tilt
+  return ring
+}
+
+function createWireFace(seed: number) {
+  const rng = mulberry32(seed)
+  const group = new THREE.Group()
+  const eyeY = 0.1 + rng() * 0.08
+  const eyeSpread = 0.18 + rng() * 0.06
+  const mouthWidth = 0.16 + rng() * 0.18
+  const mouthDrop = -0.18 - rng() * 0.08
+
+  const leftEye = buildLineFromPoints([
+    new THREE.Vector3(-eyeSpread - 0.07, eyeY, 0.39),
+    new THREE.Vector3(-eyeSpread + 0.07, eyeY + (rng() - 0.5) * 0.05, 0.39),
+  ])
+  const rightEye = buildLineFromPoints([
+    new THREE.Vector3(eyeSpread - 0.07, eyeY + (rng() - 0.5) * 0.05, 0.39),
+    new THREE.Vector3(eyeSpread + 0.07, eyeY, 0.39),
+  ])
+  const nose = buildLineFromPoints([
+    new THREE.Vector3(0, 0.02, 0.39),
+    new THREE.Vector3(0.04 - rng() * 0.08, -0.08, 0.39),
+  ])
+  const mouth = buildLineFromPoints([
+    new THREE.Vector3(-mouthWidth, mouthDrop, 0.39),
+    new THREE.Vector3(0, mouthDrop - (rng() - 0.5) * 0.08, 0.39),
+    new THREE.Vector3(mouthWidth, mouthDrop, 0.39),
+  ])
+
+  group.add(leftEye, rightEye, nose, mouth)
+  return group
+}
+
+function createWireCharacter(seed: number, scale = 1) {
+  const group = new THREE.Group()
+  const torso = buildWireframe(new THREE.BoxGeometry(0.95, 1.35, 0.55))
+  torso.position.y = 1.7
+  const head = buildWireframe(new THREE.BoxGeometry(0.78, 0.78, 0.78))
+  head.position.y = 2.72
+  head.add(createWireFace(seed))
+
+  const hips = buildWireframe(new THREE.BoxGeometry(0.7, 0.28, 0.4), 0.8)
+  hips.position.y = 0.95
+
+  const leftLeg = buildWireframe(new THREE.BoxGeometry(0.26, 1, 0.26))
+  leftLeg.position.set(-0.2, 0.47, 0)
+  const rightLeg = buildWireframe(new THREE.BoxGeometry(0.26, 1, 0.26))
+  rightLeg.position.set(0.2, 0.47, 0)
+
+  const leftArm = buildWireframe(new THREE.BoxGeometry(0.26, 1.05, 0.26))
+  leftArm.position.set(-0.73, 1.65, 0)
+  leftArm.rotation.z = 0.28
+
+  const rightArm = buildWireframe(new THREE.BoxGeometry(0.26, 1.05, 0.26))
+  rightArm.position.set(0.73, 1.65, 0)
+  rightArm.rotation.z = -0.42
+
+  const shoulderBar = buildWireframe(new THREE.BoxGeometry(1.35, 0.18, 0.2), 0.8)
+  shoulderBar.position.y = 2.15
+
+  const rightHandAnchor = new THREE.Object3D()
+  rightHandAnchor.position.set(1.05, 1.35, 0.1)
+  group.add(rightHandAnchor)
+
+  const mouthAnchor = new THREE.Object3D()
+  mouthAnchor.position.set(0.12, 2.65, 0.55)
+  group.add(mouthAnchor)
+
+  group.add(torso, head, hips, leftLeg, rightLeg, leftArm, rightArm, shoulderBar)
+  group.scale.setScalar(scale)
+
+  return { group, rightHandAnchor, mouthAnchor }
+}
+
+function createStore() {
+  const group = new THREE.Group()
+
+  const shell = buildWireframe(new THREE.BoxGeometry(12, 7, 10))
+  shell.position.set(STORE_POS.x, 3.5, STORE_POS.z)
+
+  const awning = buildWireframe(new THREE.BoxGeometry(8, 1.2, 2.5))
+  awning.position.set(STORE_POS.x + 1, 4.6, STORE_POS.z + 6.2)
+
+  const door = buildWireframe(new THREE.BoxGeometry(2.2, 4.1, 0.15))
+  door.position.set(STORE_POS.x + 2.5, 2.1, STORE_POS.z + 5.08)
+
+  const windowFrame = buildWireframe(new THREE.BoxGeometry(3.8, 2.4, 0.15))
+  windowFrame.position.set(STORE_POS.x - 2.7, 3.1, STORE_POS.z + 5.08)
+
+  const roof = buildWireframe(new THREE.ConeGeometry(7.6, 2.4, 4))
+  roof.position.set(STORE_POS.x, 8, STORE_POS.z)
+  roof.rotation.y = Math.PI / 4
+
+  const signFrame = buildWireframe(new THREE.BoxGeometry(7.5, 1.4, 0.12), 0.75)
+  signFrame.position.set(STORE_POS.x, 6.1, STORE_POS.z + 5.18)
+
+  group.add(shell, awning, door, windowFrame, roof, signFrame)
+  return group
+}
+
+function createClerk() {
+  const { group, rightHandAnchor, mouthAnchor } = createWireCharacter(40404, 1.18)
+  group.position.copy(CLERK_POS)
+  group.rotation.y = -0.32
+
+  const cigarette = buildWireframe(new THREE.BoxGeometry(0.42, 0.05, 0.05))
+  cigarette.position.set(0.22, 0, 0)
+  cigarette.rotation.z = 0.15
+  rightHandAnchor.add(cigarette)
+
+  const ember = buildCross(new THREE.Vector3(0.46, 0, 0), 0.03)
+  cigarette.add(ember)
+
+  return { group, mouthAnchor }
+}
+
+function createSmokeLines(count: number) {
+  return Array.from({ length: count }, () =>
+    buildLineFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(0, 0.2, 0),
+      new THREE.Vector3(0, 0.4, 0),
+      new THREE.Vector3(0, 0.6, 0),
+    ], false, 0.4),
+  )
+}
+
+function createEarthRig() {
+  const earthGroup = new THREE.Group()
+  earthGroup.position.copy(EARTH_POS)
+
+  const pedestal = buildWireframe(new THREE.CylinderGeometry(3.4, 4.1, 7.5, 10))
+  pedestal.position.y = -EARTH_RADIUS + 1.2
+  earthGroup.add(pedestal)
+
+  const spinGroup = new THREE.Group()
+  spinGroup.rotation.z = THREE.MathUtils.degToRad(23.4)
+  earthGroup.add(spinGroup)
+
+  const globe = buildWireframe(new THREE.IcosahedronGeometry(EARTH_RADIUS, 2))
+  spinGroup.add(globe)
+
+  for (const latitude of [-60, -30, 0, 30, 60]) {
+    const points: THREE.Vector3[] = []
+    for (let segment = 0; segment < 80; segment += 1) {
+      const longitude = (segment / 80) * 360
+      points.push(latLonToVector3(longitude, latitude, EARTH_RADIUS * 1.001))
     }
-    posBuf.element(idx).assign(vec3(px, py, pz))
-  })().compute(maxPts)
+    spinGroup.add(buildLineFromPoints(points, true, 0.28))
+  }
+
+  for (const longitude of [0, 30, 60, 90, 120, 150, 180, 210, 240, 270, 300, 330]) {
+    const points: THREE.Vector3[] = []
+    for (let segment = 0; segment <= 40; segment += 1) {
+      const latitude = -78 + (segment / 40) * 156
+      points.push(latLonToVector3(longitude, latitude, EARTH_RADIUS * 1.001))
+    }
+    spinGroup.add(buildLineFromPoints(points, false, 0.2))
+  }
+
+  for (const loop of CONTINENT_LOOPS) {
+    const points = loop.map(([longitude, latitude]) => latLonToVector3(longitude, latitude, EARTH_RADIUS * 1.02))
+    spinGroup.add(buildLineFromPoints(points, true))
+  }
+
+  const mount = new THREE.Group()
+  mount.position.y = EARTH_RADIUS + 0.45
+  spinGroup.add(mount)
+
+  const mountStem = buildWireframe(new THREE.CylinderGeometry(0.18, 0.18, 1.1, 6))
+  mountStem.position.y = -0.55
+  mount.add(mountStem)
+
+  const mountCap = buildWireframe(new THREE.CylinderGeometry(0.5, 0.5, 0.24, 8))
+  mount.add(mountCap)
+
+  const hourPivot = new THREE.Group()
+  const minutePivot = new THREE.Group()
+  const secondPivot = new THREE.Group()
+  mount.add(hourPivot)
+  hourPivot.add(minutePivot)
+  minutePivot.add(secondPivot)
+
+  const hourLength = 4.6
+  const minuteLength = 3.2
+  const secondLength = 2.4
+
+  const hourArm = buildWireframe(new THREE.BoxGeometry(hourLength, 0.2, 0.2))
+  hourArm.position.x = hourLength / 2
+  hourPivot.add(hourArm)
+
+  const minuteArm = buildWireframe(new THREE.BoxGeometry(minuteLength, 0.16, 0.16))
+  minuteArm.position.x = minuteLength / 2
+  minutePivot.position.x = hourLength
+  minutePivot.add(minuteArm)
+
+  const secondArm = buildWireframe(new THREE.BoxGeometry(secondLength, 0.12, 0.12))
+  secondArm.position.x = secondLength / 2
+  secondPivot.position.x = minuteLength
+  secondPivot.add(secondArm)
+
+  const seatAnchor = new THREE.Object3D()
+  seatAnchor.position.x = secondLength
+  secondPivot.add(seatAnchor)
+
+  const seat = new THREE.Group()
+  const seatBase = buildWireframe(new THREE.BoxGeometry(0.68, 0.18, 0.68))
+  const seatBack = buildWireframe(new THREE.BoxGeometry(0.68, 0.85, 0.12))
+  seatBack.position.set(-0.12, 0.48, -0.28)
+  const seatStrap = buildWireframe(new THREE.TorusGeometry(0.33, 0.04, 5, 14), 0.8)
+  seatStrap.rotation.x = Math.PI / 2
+  seatStrap.position.y = 0.38
+  seat.add(seatBase, seatBack, seatStrap)
+  seatAnchor.add(seat)
+
+  const bag = buildWireframe(new THREE.CylinderGeometry(0.22, 0.16, 0.5, 5))
+  bag.position.set(-0.28, -0.18, 0.28)
+  seat.add(bag)
+
+  const moonPivot = new THREE.Group()
+  spinGroup.add(moonPivot)
+  moonPivot.add(buildOrbitRing(EARTH_RADIUS + 5.2, 0.22, 60))
+  const moon = buildWireframe(new THREE.IcosahedronGeometry(1.15, 0))
+  moon.position.set(EARTH_RADIUS + 5.2, 0.8, 0)
+  moonPivot.add(moon)
+
+  return {
+    earthGroup,
+    spinGroup,
+    hourPivot,
+    minutePivot,
+    secondPivot,
+    seatAnchor,
+    moonPivot,
+    moon,
+    bag,
+  }
 }
 
-// ── Types ────────────────────────────────────────────────────────────────────
-interface LevelGPU {
-  posBuf: ReturnType<typeof attributeArray>; compute: ReturnType<typeof createCoilCompute>
-  line: THREE.Line; maxPts: number
+function createStars(count: number) {
+  const vertices: number[] = []
+  const rng = mulberry32(918273)
+  for (let index = 0; index < count; index += 1) {
+    const radius = 120 + rng() * 150
+    const theta = rng() * Math.PI * 2
+    const phi = Math.acos(1 - rng() * 2)
+    const position = new THREE.Vector3(
+      radius * Math.sin(phi) * Math.cos(theta),
+      radius * Math.cos(phi),
+      radius * Math.sin(phi) * Math.sin(theta),
+    )
+    vertices.push(
+      position.x - 0.2, position.y, position.z, position.x + 0.2, position.y, position.z,
+      position.x, position.y - 0.2, position.z, position.x, position.y + 0.2, position.z,
+    )
+  }
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
+  return new THREE.LineSegments(geometry, new THREE.LineBasicMaterial({ color: LINE_COLOR, transparent: true, opacity: 0.3 }))
 }
-interface Runtime {
-  renderer: WebGPURenderer; scene: THREE.Scene
-  camera: THREE.PerspectiveCamera; controls: OrbitControls
-  levels: LevelGPU[]; pane: Pane
+
+function buildBarfSystem(maxParticles: number) {
+  const geometry = new THREE.BufferGeometry()
+  const positions = new Float32Array(maxParticles * BARF_SEGMENTS_PER_PARTICLE * 2 * 3)
+  geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+  geometry.setDrawRange(0, 0)
+
+  const material = new THREE.LineBasicMaterial({ color: LINE_COLOR, transparent: true, opacity: 0.95 })
+  const lines = new THREE.LineSegments(geometry, material)
+  lines.frustumCulled = false
+
+  return { lines, positions }
+}
+
+function createSpaceCloudGroup(payload: SpacePayload) {
+  const root = new THREE.Group()
+  const stations = new THREE.Group()
+  const fleets = new THREE.Group()
+  const junk = new THREE.Group()
+  root.add(stations, fleets, junk)
+
+  const addTrailSet = (parent: THREE.Group, objects: SpaceObject[], scale: (value: Vec3Tuple) => THREE.Vector3, pointSize: number) => {
+    const trailVertices: number[] = []
+    const crossVertices: number[] = []
+
+    for (const object of objects) {
+      let previous: THREE.Vector3 | null = null
+      for (const point of object.trail) {
+        const next = scale(point)
+        if (previous) {
+          trailVertices.push(previous.x, previous.y, previous.z, next.x, next.y, next.z)
+        }
+        previous = next
+      }
+
+      const center = scale(object.position)
+      crossVertices.push(
+        center.x - pointSize, center.y, center.z, center.x + pointSize, center.y, center.z,
+        center.x, center.y - pointSize, center.z, center.x, center.y + pointSize, center.z,
+        center.x, center.y, center.z - pointSize, center.x, center.y, center.z + pointSize,
+      )
+    }
+
+    const trailGeometry = new THREE.BufferGeometry()
+    trailGeometry.setAttribute('position', new THREE.Float32BufferAttribute(trailVertices, 3))
+    const crossesGeometry = new THREE.BufferGeometry()
+    crossesGeometry.setAttribute('position', new THREE.Float32BufferAttribute(crossVertices, 3))
+
+    parent.add(
+      new THREE.LineSegments(trailGeometry, new THREE.LineBasicMaterial({ color: LINE_COLOR, transparent: true, opacity: 0.3 })),
+      new THREE.LineSegments(crossesGeometry, new THREE.LineBasicMaterial({ color: LINE_COLOR })),
+    )
+  }
+
+  const scaleSatellite = (point: Vec3Tuple) => new THREE.Vector3(
+    (point[0] / EARTH_KM) * EARTH_RADIUS,
+    (point[1] / EARTH_KM) * EARTH_RADIUS,
+    (point[2] / EARTH_KM) * EARTH_RADIUS,
+  )
+
+  const scaleDeepSpace = (point: Vec3Tuple) => {
+    const vector = new THREE.Vector3(point[0], point[1], point[2])
+    const distance = vector.length()
+    if (distance < 1) return new THREE.Vector3()
+    const radius = EARTH_RADIUS * 15 + Math.log10(distance / 1000 + 1) * 10
+    return vector.normalize().multiplyScalar(radius)
+  }
+
+  const stationObjects: SpaceObject[] = []
+  const fleetObjects: SpaceObject[] = []
+  const junkObjects: SpaceObject[] = []
+
+  for (const category of payload.satellites) {
+    if (category.key === 'stations') {
+      stationObjects.push(...category.objects)
+    } else if (category.key === 'starlink' || category.key === 'oneweb') {
+      fleetObjects.push(...category.objects)
+    } else {
+      junkObjects.push(...category.objects)
+    }
+  }
+
+  addTrailSet(stations, stationObjects, scaleSatellite, 0.18)
+  addTrailSet(fleets, fleetObjects, scaleSatellite, 0.08)
+  addTrailSet(junk, junkObjects, scaleSatellite, 0.06)
+
+  const moonGroup = new THREE.Group()
+  const outerGroup = new THREE.Group()
+  root.add(moonGroup, outerGroup)
+
+  addTrailSet(
+    moonGroup,
+    payload.bodies.filter((body) => body.key === 'moon' && body.position).map((body) => ({
+      position: body.position as Vec3Tuple,
+      trail: body.trail,
+    })),
+    scaleDeepSpace,
+    0.8,
+  )
+
+  addTrailSet(
+    outerGroup,
+    payload.bodies.filter((body) => body.key !== 'moon' && body.position).map((body) => ({
+      position: body.position as Vec3Tuple,
+      trail: body.trail,
+    })),
+    scaleDeepSpace,
+    0.7,
+  )
+
+  stations.name = 'stations'
+  fleets.name = 'fleets'
+  junk.name = 'junk'
+  moonGroup.name = 'moon'
+  outerGroup.name = 'outer'
+
+  return { root, stations, fleets, junk, moonGroup, outerGroup }
+}
+
+function averageVectors(vectors: THREE.Vector3[]) {
+  if (!vectors.length) return new THREE.Vector3()
+  const result = new THREE.Vector3()
+  for (const vector of vectors) result.add(vector)
+  return result.multiplyScalar(1 / vectors.length)
+}
+
+function getStageCard(story: StoryState): StageCard {
+  switch (story.stage) {
+    case 'clerk':
+      return {
+        copy: '"hey buddy wanna buy a clock," says the smoking wireframe clerk, as if the pitch explains the planet-sized machine.',
+        choices: ['Buy the clock', 'Ask about sidereal time', 'Back to the curb'],
+      }
+    case 'satellites':
+      return {
+        copy: story.satelliteFocus === 'junk'
+          ? 'Real debris clouds carve green scars around Earth: Cosmos 2251, Iridium 33, Fengyun 1C, all still drawing consequences.'
+          : story.satelliteFocus === 'all'
+            ? 'Live fleets, stations, and junk all stack together into one humming orbital bruise.'
+            : 'Real stations, Starlink, and OneWeb tracks wrap the Earth in live traffic.',
+        choices: ['Focus fleets and stations', 'Focus junk clouds', story.hasBag ? 'Strap into the clock' : 'Return to store'],
+      }
+    case 'planets':
+      return {
+        copy: story.planetFocus === 'moon'
+          ? 'The Moon gets the close-up, but the rest of the solar crowd is still there in compressed, real JPL vectors.'
+          : story.planetFocus === 'outer'
+            ? 'Planets and their moons arc across the sky in live trajectories, compressed so one scene can hold the mess.'
+            : 'Moon, planets, and major moons all draw their current paths around your ride.',
+        choices: ['Track the Moon', 'Track planets and moons', story.hasBag ? 'Back to the clock' : 'Back to store'],
+      }
+    case 'ride':
+      return {
+        copy: 'You are strapped to the end of the second hand. The hour arm turns once an hour, the minute arm once a minute, the second arm once a second. The bag is in your lap.',
+        choices: ['Hold the ride line', 'Watch planets and moons', 'Look for other riders'],
+      }
+    case 'riders':
+      return {
+        copy: 'Other players blink in over the gateway with random faces, their own doomed trajectories, and no visible intention to keep lunch down.',
+        choices: ['Stay with the riders', 'Watch live space traffic', 'Unstrap to store'],
+      }
+    case 'heresy':
+      return {
+        copy: 'He says a sidereal day is 23:56:04, brings up Bruno and Hypatia, and acts offended that philosophy once got people killed over celestial positions.',
+        choices: ['Stay in the heresy pitch', 'Buy the clock anyway', 'Back to store'],
+      }
+    case 'arrival':
+    default:
+      return {
+        copy: 'A low-poly smoker guards the Clock Store. Beside him, a wireframe Earth carries a clock on its tilted crown while live orbital traffic crawls around it.',
+        choices: ['Talk to the smoker', 'See live satellite traffic', 'See planets and moons'],
+      }
+  }
+}
+
+function getGatewayUrls() {
+  const raw = (import.meta.env.VITE_CLOCKSTORE_WS_URL || '').trim()
+  const fallbackProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:'
+  const fallbackHost = window.location.hostname || 'localhost'
+  const base = raw || `${fallbackProtocol}//${fallbackHost}:8788/ws`
+  const wsUrl = new URL(base, window.location.href)
+  if (wsUrl.pathname === '/' || wsUrl.pathname === '') {
+    wsUrl.pathname = '/ws'
+  }
+  const apiUrl = new URL(wsUrl.toString().replace(/^ws/, 'http'))
+  const wsPath = wsUrl.pathname.endsWith('/ws')
+    ? wsUrl.pathname.slice(0, -3)
+    : wsUrl.pathname
+  apiUrl.pathname = `${wsPath.replace(/\/$/, '') || ''}/api/space`
+  return { wsUrl: wsUrl.toString(), apiUrl: apiUrl.toString() }
+}
+
+function disposeScene(root: THREE.Object3D) {
+  root.traverse((object) => {
+    const meshLike = object as THREE.Mesh
+    if (meshLike.geometry) meshLike.geometry.dispose()
+    const material = (meshLike as THREE.Line | THREE.Mesh).material
+    if (Array.isArray(material)) {
+      material.forEach((entry) => entry.dispose())
+    } else if (material) {
+      material.dispose()
+    }
+  })
 }
 
 export default function Scene() {
   const canvasRef = useRef<HTMLCanvasElement>(null)
-  const overlayRef = useRef<HTMLDivElement>(null)
-  const runtimeRef = useRef<Runtime | null>(null)
-  const rafRef = useRef<number>(0)
+  const storyRef = useRef(INITIAL_STORY)
+  const [story, setStory] = useState(INITIAL_STORY)
+  const [barfLine, setBarfLine] = useState('Press B once the bag is yours.')
+  const [aside, setAside] = useState('Three buttons. One bag. No settings.')
+  const [peers, setPeers] = useState(1)
+  const [spaceReady, setSpaceReady] = useState(false)
+  const [spaceNote, setSpaceNote] = useState('Drawing the sky…')
+
+  const stageCard = useMemo(() => getStageCard(story), [story])
+
+  useEffect(() => {
+    storyRef.current = story
+  }, [story])
+
+  const choose = (index: 1 | 2 | 3) => {
+    setStory((current) => {
+      const next = { ...current }
+
+      switch (current.stage) {
+        case 'arrival':
+          if (index === 1) next.stage = 'clerk'
+          if (index === 2) {
+            next.stage = 'satellites'
+            next.satelliteFocus = 'fleets'
+          }
+          if (index === 3) {
+            next.stage = 'planets'
+            next.planetFocus = 'moon'
+          }
+          break
+        case 'clerk':
+          if (index === 1) {
+            next.stage = 'ride'
+            next.hasBag = true
+            setAside('He hands you a wireframe barf bag and buckles the second-hand seat.')
+          }
+          if (index === 2) next.stage = 'heresy'
+          if (index === 3) next.stage = 'arrival'
+          break
+        case 'satellites':
+          if (index === 1) {
+            next.satelliteFocus = 'fleets'
+            setAside('Stations, Starlink, and OneWeb stay in view.')
+          }
+          if (index === 2) {
+            next.satelliteFocus = 'junk'
+            setAside('Debris clouds take the whole stage.')
+          }
+          if (index === 3) {
+            next.stage = next.hasBag ? 'ride' : 'arrival'
+          }
+          break
+        case 'planets':
+          if (index === 1) {
+            next.planetFocus = 'moon'
+            setAside('The Moon gets the closest camera.')
+          }
+          if (index === 2) {
+            next.planetFocus = 'outer'
+            setAside('Outer planets and major moons take over the sky.')
+          }
+          if (index === 3) {
+            next.stage = next.hasBag ? 'ride' : 'arrival'
+          }
+          break
+        case 'ride':
+          if (index === 1) {
+            next.stage = 'ride'
+            setAside('You stay locked into the second-hand seat.')
+          }
+          if (index === 2) {
+            next.stage = 'planets'
+            next.planetFocus = 'all'
+          }
+          if (index === 3) next.stage = 'riders'
+          break
+        case 'riders':
+          if (index === 1) {
+            next.stage = 'riders'
+            setAside('Everybody looks like a bad idea rendered perfectly.')
+          }
+          if (index === 2) {
+            next.stage = 'satellites'
+            next.satelliteFocus = 'all'
+          }
+          if (index === 3) next.stage = 'arrival'
+          break
+        case 'heresy':
+          if (index === 1) {
+            next.stage = 'heresy'
+            setAside('He keeps talking about Bruno, Hypatia, and how clocks are political.')
+          }
+          if (index === 2) {
+            next.stage = 'ride'
+            next.hasBag = true
+          }
+          if (index === 3) next.stage = 'arrival'
+          break
+      }
+
+      return next
+    })
+  }
 
   useEffect(() => {
     const canvas = canvasRef.current
-    const overlay = overlayRef.current
-    if (!canvas || !overlay) return
+    if (!canvas) return
+
+    const { wsUrl, apiUrl } = getGatewayUrls()
+    const renderer = new THREE.WebGLRenderer({ canvas, antialias: false, alpha: false })
+    renderer.setPixelRatio(1)
+    renderer.setSize(window.innerWidth, window.innerHeight, false)
+    renderer.setClearColor(0x000000, 1)
+
+    const scene = new THREE.Scene()
+    const camera = new THREE.PerspectiveCamera(60, window.innerWidth / window.innerHeight, 0.1, 1200)
+    scene.add(camera)
+
+    const root = new THREE.Group()
+    scene.add(root)
+    root.add(createStars(160))
+
+    const ground = buildWireframe(new THREE.PlaneGeometry(160, 160, 24, 24), 0.24)
+    ground.rotation.x = -Math.PI / 2
+    root.add(ground)
+
+    const store = createStore()
+    root.add(store)
+
+    const clerk = createClerk()
+    root.add(clerk.group)
+    const smokeLines = createSmokeLines(4)
+    smokeLines.forEach((line) => root.add(line))
+
+    const earthRig = createEarthRig()
+    root.add(earthRig.earthGroup)
+
+    const sun = buildWireframe(new THREE.IcosahedronGeometry(2, 1), 0.8)
+    sun.position.set(-20, 40, -75)
+    root.add(sun)
+
+    const planetOrbits = new THREE.Group()
+    planetOrbits.add(buildOrbitRing(18, 0.2), buildOrbitRing(26, 0.35), buildOrbitRing(34, -0.15))
+    planetOrbits.position.copy(EARTH_POS)
+    root.add(planetOrbits)
+
+    const orbitLayers = new THREE.Group()
+    orbitLayers.position.copy(EARTH_POS)
+    root.add(orbitLayers)
+
+    let spaceClouds: ReturnType<typeof createSpaceCloudGroup> | null = null
+    let spacePayload: SpacePayload | null = null
+
+    const remotePlayers = new Map<string, RemoteAvatar>()
+    const particles: BarfParticle[] = []
+    const barfSystem = buildBarfSystem(900)
+    root.add(barfSystem.lines)
+
+    const currentCameraPos = new THREE.Vector3(-6, 16, 34)
+    const currentTarget = new THREE.Vector3(-4, 9, 4)
+    const desiredCameraPos = new THREE.Vector3()
+    const desiredTarget = new THREE.Vector3()
+    const seatWorld = new THREE.Vector3()
+    const seatPrev = new THREE.Vector3()
+    const seatVelocity = new THREE.Vector3(1, 0, 0)
+    const seatDrift = new THREE.Vector3()
+    const earthWorld = new THREE.Vector3()
+    const moonWorld = new THREE.Vector3()
+    const stageAnchor = new THREE.Vector3()
+    const tmp = new THREE.Vector3()
+    const tmp2 = new THREE.Vector3()
+    const forward = new THREE.Vector3()
+    const coneDir = new THREE.Vector3()
+    const emitterOrigin = new THREE.Vector3()
+    const emitterVelocity = new THREE.Vector3()
+    const mouthOrigin = new THREE.Vector3()
+    const cameraBarfOrigin = new THREE.Vector3()
+
+    let animationId = 0
+    let socket: WebSocket | null = null
+    let localId: string | null = null
     let disposed = false
-    let onSpaceKey: ((e: KeyboardEvent) => void) | null = null
+    let lastStateSend = 0
+    let lastPeerCount = 1
 
-    const START_YEAR = -10000, END_YEAR = 2100
-    const TOTAL_YEARS = END_YEAR - START_YEAR
-    const CENTURY_TURNS = TOTAL_YEARS / 100
-
-    const params = {
-      coilRadius: 1, turnSpacing: 10, fillFactor: 0.55,
-      offsets: [0, 0, 0, 0, 0, 0, 0],
-      panSpeed: 0.001, focusT: 0.7854,  // Ionian Revolt, ~497 BCE
+    const localSeedKey = 'clock-store-face-seed'
+    const storedSeed = Number(window.localStorage.getItem(localSeedKey) || 0)
+    const localFaceSeed = Number.isFinite(storedSeed) && storedSeed > 0 ? storedSeed : Math.floor(Math.random() * 1_000_000_000)
+    if (!storedSeed) {
+      window.localStorage.setItem(localSeedKey, String(localFaceSeed))
     }
 
-    function syncOffsets() {
-      let off = params.coilRadius
-      for (let i = 1; i < params.offsets.length; i++) {
-        off = off * params.fillFactor / Math.sqrt(HIERARCHY[i].turnsPerParent)
-        params.offsets[i] = off
-      }
-    }
-    syncOffsets()
-
-    const tBaseU = uniform(0), tStepU = uniform(0)
-    const baseFracUniforms = HIERARCHY.map(() => uniform(0))
-    const radiusU = uniform(params.coilRadius)
-    const lengthU = uniform(CENTURY_TURNS * params.turnSpacing)
-    const omegaU = uniform(CENTURY_TURNS * TAU), tmagU = uniform(1)
-    const offUniforms = params.offsets.map(v => uniform(v))
-
-    function syncHelixUniforms() {
-      const R = params.coilRadius, L = CENTURY_TURNS * params.turnSpacing, omega = CENTURY_TURNS * TAU
-      radiusU.value = R; lengthU.value = L; omegaU.value = omega
-      tmagU.value = Math.sqrt(R * R * omega * omega + L * L)
+    function playerOffset(seed: number) {
+      const angle = ((seed % 360) * Math.PI) / 180
+      return new THREE.Vector3(Math.cos(angle) * 1.2, 0, Math.sin(angle) * 1.2)
     }
 
-    function getTotalTurns(): number[] {
-      const t = [CENTURY_TURNS]
-      for (let i = 1; i < HIERARCHY.length; i++) t.push(t[i - 1] * HIERARCHY[i].turnsPerParent)
-      return t
+    function createRemoteAvatar(faceSeed: number) {
+      const avatar = createWireCharacter(faceSeed, 0.82)
+      const bag = buildWireframe(new THREE.CylinderGeometry(0.12, 0.09, 0.28, 5), 0.75)
+      bag.position.set(-0.22, 0.95, 0.24)
+      avatar.group.add(bag)
+      return avatar.group
     }
 
-    function getHelixConsts() {
-      const R = params.coilRadius, L = CENTURY_TURNS * params.turnSpacing, omega = CENTURY_TURNS * TAU
-      return { R, L, omega, tMag: Math.sqrt(R * R * omega * omega + L * L) }
-    }
-
-    function winBounds(totalTurns: number, spt: number) {
-      const halfT = (WINDOW / 2) / totalTurns
-      const tS = Math.max(0, params.focusT - halfT), tE = Math.min(1, params.focusT + halfT)
-      return { tS, tR: tE - tS }
-    }
-
-    // ── Camera ──────────────────────────────────────────────────────────────
-    const _pos = { x: 0, y: 0, z: 0 }, _nrm = { x: 0, y: 0, z: 0 }, _bin = { x: 0, y: 0, z: 0 }
-    const _rN = new THREE.Vector3(), _rB = new THREE.Vector3(), _tan = new THREE.Vector3(), _off = new THREE.Vector3()
-    const _cfP0 = { x: 0, y: 0, z: 0 }, _cfP1 = { x: 0, y: 0, z: 0 }
-    const _cfNv = new THREE.Vector3(), _cfBv = new THREE.Vector3(), _cfTmp = new THREE.Vector3()
-    let prevFocusT = params.focusT
-    let _cachedTotals: number[] | null = null
-    function getCachedTotals() { if (!_cachedTotals) _cachedTotals = getTotalTurns(); return _cachedTotals }
-
-    // Camera level: which coil level the camera tracks (can be fractional for smooth transitions)
-    // Rotation level: determines the rate at which the camera rotates to stay on the "correct side"
-    // of the parent coil. Typically one level above the camera level.
-    let cameraLevel = 3
-    let rotationLevel = 2
-
-    function cameraFrame(t: number) {
-      const totals = getCachedTotals(), hc = getHelixConsts()
-      const lvl = Math.round(cameraLevel)
-      evalCoil(t, lvl, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _pos)
-
-      // If fractional level, interpolate position between floor and ceil
-      const frac = cameraLevel - Math.floor(cameraLevel)
-      if (frac > 0.001 && frac < 0.999) {
-        const lo = Math.floor(cameraLevel), hi = Math.ceil(cameraLevel)
-        evalCoil(t, lo, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _cfP0)
-        evalCoil(t, hi, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _cfP1)
-        _pos.x = _cfP0.x + frac * (_cfP1.x - _cfP0.x)
-        _pos.y = _cfP0.y + frac * (_cfP1.y - _cfP0.y)
-        _pos.z = _cfP0.z + frac * (_cfP1.z - _cfP0.z)
-      }
-
-      // Simple Y-axis rotation frame: no tilt, no bob
-      // Radial = outward from Y axis (always horizontal)
-      const theta = t * hc.omega
-      _rN.set(Math.cos(theta), 0, Math.sin(theta))
-      // Up = world Y
-      _rB.set(0, 1, 0)
-      // Tangential = cross(up, radial) — horizontal, perpendicular to radial
-      _tan.set(-Math.sin(theta), 0, Math.cos(theta))
-    }
-
-    const LEVEL_HUES = [0, 0.08, 0.16, 0.33, 0.55, 0.72, 0.88]
-
-    function createLevels(scene: THREE.Scene): LevelGPU[] {
-      syncHelixUniforms()
-      const totals = getTotalTurns()
-      return HIERARCHY.map((h, lvl) => {
-        const maxPts = WINDOW * h.spt + 1
-        const posBuf = attributeArray(new Float32Array(maxPts * 3), 'vec3')
-        const compute = createCoilCompute(lvl, totals, maxPts, offUniforms, tBaseU, tStepU, baseFracUniforms, radiusU, lengthU, omegaU, tmagU, posBuf)
-        const col = new THREE.Color().setHSL(LEVEL_HUES[lvl], 1, 0.5)
-        const mat = new THREE.LineBasicMaterial({ color: col })
-        const geom = new THREE.BufferGeometry(); geom.setAttribute('position', posBuf.value)
-        const line = new THREE.Line(geom, mat); line.frustumCulled = false; scene.add(line)
-        return { posBuf, compute, line, maxPts }
-      })
-    }
-
-    function disposeLevels(rt: Runtime) { for (const lv of rt.levels) { rt.scene.remove(lv.line); lv.line.geometry.dispose() }; rt.levels = [] }
-
-    // Origin offset: the focus point's position is subtracted from everything
-    // so all geometry stays near (0,0,0) where Float32 is most precise.
-    const origin = { x: 0, y: 0, z: 0 }
-
-    let prevOriginT = -1
-    let originBlend = 1.0 // 1 = follow helix exactly, 0 = follow Y axis (no wobble)
-    function computeOrigin() {
-      const hc = getHelixConsts()
-      const theta = params.focusT * hc.omega
-      const helixX = hc.R * Math.cos(theta)
-      const helixZ = hc.R * Math.sin(theta)
-      origin.y = (params.focusT - 0.5) * hc.L
-
-      if (prevOriginT < 0) {
-        origin.x = helixX; origin.z = helixZ
-        prevOriginT = params.focusT
+    function upsertRemotePlayer(player: RemotePlayerState) {
+      if (localId && player.id === localId) return
+      const target = new THREE.Vector3(player.position[0], player.position[1], player.position[2])
+      const existing = remotePlayers.get(player.id)
+      if (existing) {
+        existing.targetPosition.copy(target)
+        existing.yaw = player.yaw
+        existing.boarded = player.boarded
         return
       }
 
-      const dt = Math.abs(params.focusT - prevOriginT)
-      const turnsPerFrame = dt * CENTURY_TURNS
-      prevOriginT = params.focusT
-
-      // Blend target: slow → 1 (helix), fast → 0 (Y axis)
-      const target = turnsPerFrame < 0.001 ? 1.0 : Math.max(0, 1.0 - turnsPerFrame * 20)
-      originBlend += (target - originBlend) * 0.08
-
-      origin.x = helixX * originBlend
-      origin.z = helixZ * originBlend
+      const group = createRemoteAvatar(player.faceSeed)
+      group.position.copy(target)
+      root.add(group)
+      remotePlayers.set(player.id, {
+        group,
+        targetPosition: target,
+        yaw: player.yaw,
+        boarded: player.boarded,
+      })
     }
 
-    function dispatchCompute(rt: Runtime) {
-      computeOrigin()
-      const totals = getTotalTurns(), hc = getHelixConsts(), pos = { x: 0, y: 0, z: 0 }
-      for (let i = 0; i < rt.levels.length; i++) {
-        const w = winBounds(totals[i], HIERARCHY[i].spt), maxPts = rt.levels[i].maxPts
-        const arr = rt.levels[i].posBuf.value.array as Float32Array
-        for (let v = 0; v < maxPts; v++) {
-          const t = w.tS + w.tR * v / (maxPts - 1)
-          evalCoil(t, i, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, pos)
-          arr[v * 3] = pos.x - origin.x; arr[v * 3 + 1] = pos.y - origin.y; arr[v * 3 + 2] = pos.z - origin.z
-        }
-        rt.levels[i].posBuf.value.needsUpdate = true
-        ;(rt.levels[i].posBuf as any).version = (rt.levels[i].posBuf as any).version + 1 || 1
+    function syncRemotePlayers(playersState: RemotePlayerState[]) {
+      const incoming = new Set(playersState.map((player) => player.id))
+      for (const player of playersState) upsertRemotePlayer(player)
+      for (const [id, avatar] of remotePlayers.entries()) {
+        if (incoming.has(id)) continue
+        root.remove(avatar.group)
+        remotePlayers.delete(id)
+      }
+      const nextPeers = remotePlayers.size + 1
+      if (nextPeers !== lastPeerCount) {
+        lastPeerCount = nextPeers
+        setPeers(nextPeers)
       }
     }
 
-    const _ufP = new THREE.Vector3(), _ufP2 = new THREE.Vector3()
-
-    // Ideal view distance for a given camera level
-    function viewDistForLevel(lvl: number): number {
-      // Interpolate between integer levels
-      const lo = Math.floor(lvl), hi = Math.ceil(lvl), frac = lvl - lo
-      const distLo = (lo === 0 ? params.coilRadius : params.offsets[lo]) * 8
-      const distHi = (hi === 0 ? params.coilRadius : params.offsets[Math.min(hi, params.offsets.length - 1)]) * 8
-      return distLo + frac * (distHi - distLo)
+    function emitBarf(
+      origin: THREE.Vector3,
+      direction: THREE.Vector3,
+      carrierVelocity: THREE.Vector3,
+      strength = 1,
+      nearStart = 0.6,
+    ) {
+      const rng = mulberry32(Math.floor(origin.x * 1000 + origin.y * 400 + origin.z * 200))
+      const normalized = direction.clone().normalize()
+      const carry = carrierVelocity.clone()
+      for (let index = 0; index < 72; index += 1) {
+        const coneAngle = 0.12 + rng() * 0.38
+        const coneSpin = rng() * Math.PI * 2
+        const sideways = new THREE.Vector3(
+          Math.cos(coneSpin) * Math.sin(coneAngle),
+          Math.sin(coneSpin) * Math.sin(coneAngle) * 0.75,
+          Math.cos(coneAngle),
+        )
+        coneDir.copy(sideways).applyQuaternion(
+          new THREE.Quaternion().setFromUnitVectors(new THREE.Vector3(0, 0, 1), normalized),
+        )
+        const velocity = coneDir
+          .clone()
+          .multiplyScalar(8 + rng() * 10 * strength)
+          .add(carry.clone().multiplyScalar(0.55))
+          .add(new THREE.Vector3((rng() - 0.5) * 0.8, (rng() - 0.5) * 0.6, (rng() - 0.5) * 0.8))
+        particles.push({
+          position: origin.clone().addScaledVector(normalized, nearStart + rng() * 0.45),
+          velocity,
+          life: 2.8 + rng() * 2.6,
+          size: 0.12 + rng() * 0.18,
+        })
+      }
     }
 
-    let cameraInitialized = false
-    const _camDir = new THREE.Vector3()
+    function triggerBarf(fromRemote = false, origin?: THREE.Vector3, yaw?: number) {
+      if (!fromRemote && !storyRef.current.hasBag) {
+        setAside('You do not own the bag yet.')
+        return
+      }
+      const fact = BARF_FACTS[Math.floor(Math.random() * BARF_FACTS.length)]
+      if (!fromRemote) {
+        setBarfLine(fact)
+      }
 
-    function positionCamera(rt: Runtime) {
-      cameraFrame(params.focusT)
-      const hc = getHelixConsts()
-      const theta = params.focusT * hc.omega
-      // Camera target = sub-coil offset from the century helix.
-      // Strips out the helical X/Z oscillation — at level 0 this is (0,0,0).
-      _ufP2.x = _pos.x - hc.R * Math.cos(theta)
-      _ufP2.y = _pos.y - origin.y
-      _ufP2.z = _pos.z - hc.R * Math.sin(theta)
-
-      const dist = viewDistForLevel(cameraLevel)
-
-      if (!cameraInitialized) {
-        const tilt = 0.25
-        rt.camera.position.copy(_ufP2)
-          .addScaledVector(_rN, dist * Math.cos(tilt))
-          .addScaledVector(_rB, -dist * Math.sin(tilt))
-          .addScaledVector(_tan, -dist * 0.1)
-        rt.controls.target.copy(_ufP2)
-        cameraInitialized = true
+      camera.getWorldDirection(forward)
+      const boarded = storyRef.current.stage === 'ride' || storyRef.current.stage === 'riders' || (storyRef.current.stage === 'planets' && storyRef.current.hasBag)
+      if (fromRemote) {
+        emitterOrigin.copy(origin ?? seatWorld).add(boarded ? new THREE.Vector3(0, 0.9, 0) : new THREE.Vector3(0, 1.2, 0))
+        forward.set(Math.sin(yaw ?? 0), 0.18, Math.cos(yaw ?? 0)).normalize()
+        emitterVelocity.set(0, 0, 0)
       } else {
-        _camDir.copy(rt.camera.position).sub(rt.controls.target)
-        const curDist = _camDir.length()
-        if (curDist > 0.0001) _camDir.multiplyScalar(dist / curDist)
-        else _camDir.set(dist, 0, 0)
-        rt.controls.target.copy(_ufP2)
-        rt.camera.position.copy(_ufP2).add(_camDir)
+        mouthOrigin.copy(origin ?? seatWorld).add(boarded ? new THREE.Vector3(0, 0.9, 0) : new THREE.Vector3(0, 1.2, 0))
+        cameraBarfOrigin.copy(camera.position).addScaledVector(forward, 0.78).add(new THREE.Vector3(0, -0.08, 0))
+        emitterOrigin.copy(mouthOrigin).lerp(cameraBarfOrigin, boarded ? 0.84 : 0.5)
+        emitterVelocity.copy(seatDrift)
+      }
+      if (!storyRef.current.hasBag && !fromRemote) return
+      emitBarf(emitterOrigin, forward, emitterVelocity, fromRemote ? 0.8 : 1.1, fromRemote ? 0.6 : 0.16)
+
+      if (!fromRemote && socket?.readyState === WebSocket.OPEN) {
+        socket.send(JSON.stringify({ type: 'barf' }))
       }
     }
 
-    function updateFocus(rt: Runtime) {
-      prevFocusT = params.focusT
-      dispatchCompute(rt)
-      positionCamera(rt)
-    }
-
-    // ── Date formatting ─────────────────────────────────────────────────────
-    function focusTToDate(ft: number): string {
-      const fracYear = START_YEAR + ft * TOTAL_YEARS
-      const year = Math.floor(fracYear)
-      const dayOfYear = (fracYear - year) * 365.25
-      const day = Math.floor(dayOfYear)
-      const fracDay = dayOfYear - day
-      const hour = Math.floor(fracDay * 24)
-      const minute = Math.floor((fracDay * 24 - hour) * 60)
-      const second = Math.floor(((fracDay * 24 - hour) * 60 - minute) * 60)
-      const month = Math.floor(day / 30.44) + 1
-      const dayOfMonth = Math.floor(day - (month - 1) * 30.44) + 1
-      const pad = (n: number) => String(n).padStart(2, '0')
-      const yearStr = year < 0 ? `${-year} BCE` : `${year} CE`
-      return `${yearStr} ${pad(month)}/${pad(dayOfMonth)} ${pad(hour)}:${pad(minute)}:${pad(second)}`
-    }
-
-    function yearLabel(year: number): string {
-      return year < 0 ? `${-year} BCE` : year === 0 ? '1 BCE' : `${year} CE`
-    }
-
-    function eventDateStr(t: number): string {
-      const fracYear = START_YEAR + t * TOTAL_YEARS
-      const year = Math.floor(fracYear)
-      const frac = fracYear - year
-      // No sub-year precision — just show the year
-      if (frac < 0.003) return yearLabel(year) // within ~1 day of Jan 1
-      const dayOfYear = frac * 365.25
-      const daysInMonth = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-      let rem = Math.floor(dayOfYear), m = 0
-      while (m < 11 && rem >= daysInMonth[m]) { rem -= daysInMonth[m]; m++ }
-      const fracDay = dayOfYear - Math.floor(dayOfYear)
-      // Has hour precision?
-      if (fracDay > 0.02) {
-        const hour = Math.floor(fracDay * 24)
-        return `${yearLabel(year)}, ${months[m]} ${rem + 1} ${hour}:00`
+    function handleKey(event: KeyboardEvent) {
+      if (event.repeat) return
+      if (event.key === '1') choose(1)
+      if (event.key === '2') choose(2)
+      if (event.key === '3') choose(3)
+      if (event.key.toLowerCase() === 'b') {
+        triggerBarf()
       }
-      return `${yearLabel(year)}, ${months[m]} ${rem + 1}`
     }
 
-    function relativeDateStr(t: number, focusT: number): string {
-      const dy = (t - focusT) * TOTAL_YEARS
-      const abs = Math.abs(dy)
-      const sign = dy < 0 ? '-' : '+'
-      if (abs < 1 / 8766) return 'now'
-      if (abs < 1 / 365.25) return `${sign}${(abs * 8766).toFixed(0)}h`
-      if (abs < 1) return `${sign}${(abs * 365.25).toFixed(0)}d`
-      if (abs < 100) return `${sign}${abs.toFixed(1)}y`
-      if (abs < 1000) return `${sign}${Math.round(abs)}y`
-      return `${sign}${(abs / 1000).toFixed(1)}ky`
-    }
-
-    function dayLabel(fracYear: number): string {
-      const dayOfYear = (fracYear - Math.floor(fracYear)) * 365.25
-      const daysInMonth = [31, 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31]
-      const months = ['Jan','Feb','Mar','Apr','May','Jun','Jul','Aug','Sep','Oct','Nov','Dec']
-      let rem = Math.floor(dayOfYear), m = 0
-      while (m < 11 && rem >= daysInMonth[m]) { rem -= daysInMonth[m]; m++ }
-      return `${months[m]} ${rem + 1}`
-    }
-
-    function hourLabel(fracYear: number): string {
-      const dayOfYear = (fracYear - Math.floor(fracYear)) * 365.25
-      const fracDay = dayOfYear - Math.floor(dayOfYear)
-      return `${String(Math.floor(fracDay * 24)).padStart(2, '0')}:00`
-    }
-
-    // ── Init ────────────────────────────────────────────────────────────────
-    const init = async () => {
-      if (!navigator.gpu) { document.body.innerHTML = '<div style="display:flex;align-items:center;justify-content:center;height:100vh;color:#fff;background:#111;font-family:system-ui;font-size:1.5rem;">WebGPU not supported</div>'; return }
-      const w = window.innerWidth, h = window.innerHeight
-      const renderer = new WebGPURenderer({ canvas: canvas!, antialias: true, logarithmicDepthBuffer: true })
-      renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 2)); renderer.setSize(w, h, false)
-      await renderer.init()
-      if (!(renderer as any).backend?.isWebGPUBackend) { renderer.dispose(); return }
-      if (disposed) { renderer.dispose(); return }
-
-      const scene = new THREE.Scene(); scene.background = new THREE.Color(0x111111)
-      const camera = new THREE.PerspectiveCamera(60, w / h, 0.0000001, 10000)
-      const controls = new OrbitControls(camera, renderer.domElement)
-      controls.enableDamping = true; controls.dampingFactor = 0.08; controls.enablePan = false; controls.enableZoom = false
-
-      scene.add(new THREE.DirectionalLight(0xffffff, 2).translateX(3).translateY(5).translateZ(4))
-      scene.add(new THREE.AmbientLight(0xffffff, 0.3))
-
-      const pane = new Pane({ title: 'Time Helix' })
-
-      // ── Unified label system ─────────────────────────────────────────────
-      const LABEL_TIERS = [
-        { name: 'century', yearStep: 100, coilLevel: 0, minCamLvl: 0, windowYears: Infinity, lineLen: 0.3, fontPx: 24, skipEvery: 0 },
-        { name: 'decade', yearStep: 10, coilLevel: 1, minCamLvl: 1, windowYears: 500, lineLen: 0.15, fontPx: 18, skipEvery: 100 },
-        { name: 'year', yearStep: 1, coilLevel: 2, minCamLvl: 2, windowYears: 50, lineLen: 0.08, fontPx: 14, skipEvery: 10 },
-        { name: 'day', yearStep: 1/365.25, coilLevel: 3, minCamLvl: 3, windowYears: 1, lineLen: 0.03, fontPx: 11, skipEvery: 0 },
-        { name: 'hour', yearStep: 1/8766, coilLevel: 4, minCamLvl: 4, windowYears: 0.01, lineLen: 0.01, fontPx: 9, skipEvery: 0 },
-      ]
-
-      const MAX_MARKERS = 300
-      const markerPosArr = new Float32Array(MAX_MARKERS * 2 * 3)
-      const markerPosAttr = new THREE.BufferAttribute(markerPosArr, 3)
-      const markerColArr = new Float32Array(MAX_MARKERS * 2 * 3)
-      const markerColAttr = new THREE.BufferAttribute(markerColArr, 3)
-      markerColArr.fill(1)
-      const markerGeom = new THREE.BufferGeometry()
-      markerGeom.setAttribute('position', markerPosAttr)
-      markerGeom.setAttribute('color', markerColAttr)
-      const markerSegs = new THREE.LineSegments(markerGeom, new THREE.LineBasicMaterial({ vertexColors: true }))
-      markerSegs.frustumCulled = false; scene.add(markerSegs)
-
-
-      function eventWindowYears(level: number): number {
-        return level === 0 ? 3000 : level === 1 ? 500 : level === 2 ? 50 : level === 3 ? 5 : 0.5
+    function getLocalStagePosition(state: StoryState) {
+      const offset = playerOffset(localFaceSeed)
+      if (state.stage === 'clerk' || state.stage === 'heresy') {
+        return CLERK_POS.clone().add(new THREE.Vector3(-1.4, 0, 2.6)).add(offset)
       }
+      if (state.stage === 'satellites' || state.stage === 'planets') {
+        return EARTH_POS.clone().add(new THREE.Vector3(-8, -EARTH_RADIUS, 10)).add(offset)
+      }
+      return STORE_POS.clone().add(new THREE.Vector3(10, 0, 18)).add(offset)
+    }
 
-      // ── Events ────────────────────────────────────────────────────────────
-      interface CoilEvent { name: string; t: number; level: number; color: string; tMin?: number; tMax?: number }
+    function updateOrbitVisibility(state: StoryState) {
+      if (!spaceClouds) return
+      spaceClouds.stations.visible = state.stage === 'arrival' || state.stage === 'ride' || state.stage === 'satellites'
+      spaceClouds.fleets.visible = state.stage === 'satellites' && (state.satelliteFocus === 'fleets' || state.satelliteFocus === 'all')
+      spaceClouds.junk.visible = state.stage === 'satellites' && (state.satelliteFocus === 'junk' || state.satelliteFocus === 'all')
+      if (state.stage === 'arrival' || state.stage === 'ride') {
+        spaceClouds.stations.visible = true
+        spaceClouds.fleets.visible = state.stage === 'ride'
+        spaceClouds.junk.visible = false
+      }
+      spaceClouds.moonGroup.visible = state.stage === 'planets' || state.stage === 'ride' || state.stage === 'arrival'
+      spaceClouds.outerGroup.visible = state.stage === 'planets' && state.planetFocus !== 'moon'
+      if (state.stage === 'planets' && state.planetFocus === 'all') {
+        spaceClouds.moonGroup.visible = true
+        spaceClouds.outerGroup.visible = true
+      }
+      if (state.stage === 'ride') {
+        spaceClouds.moonGroup.visible = true
+        spaceClouds.outerGroup.visible = false
+      }
+      if (state.stage === 'arrival') {
+        spaceClouds.moonGroup.visible = false
+        spaceClouds.outerGroup.visible = false
+      }
+    }
 
-      function yearToT(year: number): number { return (year - START_YEAR) / TOTAL_YEARS }
-      function dateToT(dateStr: string): number {
-        // Parse manually to handle negative years (BCE) which JS Date mangles
-        const m = dateStr.match(/^(-?\d+)-(\d{2})-(\d{2})(?:T(\d{2}):(\d{2}))?/)
-        if (m) {
-          const year = parseInt(m[1])
-          const month = parseInt(m[2]), day = parseInt(m[3])
-          const hour = m[4] ? parseInt(m[4]) : 0, min = m[5] ? parseInt(m[5]) : 0
-          const daysToMonth = [0, 31, 59, 90, 120, 151, 181, 212, 243, 273, 304, 334]
-          const dayOfYear = daysToMonth[month - 1] + day - 1
-          const fracYear = year + (dayOfYear + (hour + min / 60) / 24) / 365.25
-          return (fracYear - START_YEAR) / TOTAL_YEARS
+    function updateCamera(nowSeconds: number) {
+      const state = storyRef.current
+      earthRig.seatAnchor.getWorldPosition(seatWorld)
+      earthRig.moon.getWorldPosition(moonWorld)
+      earthRig.earthGroup.getWorldPosition(earthWorld)
+
+      tmp.copy(seatWorld).sub(seatPrev)
+      seatDrift.copy(tmp).multiplyScalar(60)
+      if (tmp.lengthSq() > 0.000001) {
+        seatVelocity.copy(tmp).normalize()
+      }
+      seatPrev.copy(seatWorld)
+
+      const boarded = state.stage === 'ride' || state.stage === 'riders' || (state.stage === 'planets' && state.hasBag)
+      earthRig.bag.visible = state.hasBag
+
+      if (boarded) {
+        const outward = tmp2.copy(seatWorld).sub(earthWorld).normalize()
+        desiredCameraPos.copy(seatWorld)
+        desiredTarget.copy(seatWorld)
+        if (state.stage === 'ride') {
+          desiredCameraPos.addScaledVector(outward, 2.4).add(new THREE.Vector3(0, 1.2, 0)).addScaledVector(seatVelocity, -1.5)
+          desiredTarget.addScaledVector(seatVelocity, 8).addScaledVector(outward, 1.4)
+        } else if (state.stage === 'riders') {
+          const remotePositions = [...remotePlayers.values()].map((avatar) => avatar.group.position)
+          const riderFocus = remotePositions.length ? averageVectors(remotePositions) : moonWorld
+          desiredCameraPos.addScaledVector(outward, 6).add(new THREE.Vector3(0, 3.5, 0))
+          desiredTarget.copy(riderFocus)
+        } else {
+          desiredCameraPos.addScaledVector(outward, 6).add(new THREE.Vector3(0, 3.5, 0))
+          desiredTarget.copy(state.planetFocus === 'moon' ? moonWorld : earthWorld.clone().add(new THREE.Vector3(-20, 24, -40)))
         }
-        const ms = new Date(dateStr).getTime()
-        return (1970 + ms / (365.25 * 24 * 3600 * 1000) - START_YEAR) / TOTAL_YEARS
+        stageAnchor.copy(seatWorld)
+      } else {
+        stageAnchor.copy(getLocalStagePosition(state))
+        if (state.stage === 'clerk') {
+          desiredCameraPos.set(-18, 6.2, 14)
+          desiredTarget.copy(CLERK_POS).add(new THREE.Vector3(0, 2.3, 0))
+        } else if (state.stage === 'satellites') {
+          desiredCameraPos.copy(EARTH_POS).add(new THREE.Vector3(-24, 14, 24))
+          desiredTarget.copy(EARTH_POS).add(new THREE.Vector3(0, 5, 0))
+        } else if (state.stage === 'planets') {
+          desiredCameraPos.copy(EARTH_POS).add(new THREE.Vector3(22, 19, 26))
+          desiredTarget.copy(state.planetFocus === 'moon' ? moonWorld : EARTH_POS.clone().add(new THREE.Vector3(0, 20, -60)))
+        } else if (state.stage === 'heresy') {
+          desiredCameraPos.set(-8, 11, 24)
+          desiredTarget.copy(EARTH_POS).multiplyScalar(0.55).add(CLERK_POS.clone().multiplyScalar(0.45))
+        } else {
+          desiredCameraPos.set(-6, 16 + Math.sin(nowSeconds * 0.15) * 0.8, 34)
+          desiredTarget.set(-4, 9, 4)
+        }
       }
 
-      let events: CoilEvent[] = [
-        // Prehistoric & early civilization
-        { name: 'First cave paintings (Lascaux)', t: yearToT(-8000), level: 0, color: '#c0a060' },
-        { name: 'Agriculture begins (Fertile Crescent)', t: yearToT(-9500), level: 0, color: '#6bcb77' },
-        { name: 'Çatalhöyük settled', t: yearToT(-7500), level: 0, color: '#c0a060' },
-        { name: 'First writing (Sumerian cuneiform)', t: yearToT(-3400), level: 0, color: '#c0a060' },
-        { name: 'Unification of Egypt', t: yearToT(-3100), level: 0, color: '#ffd93d' },
-        { name: 'Great Pyramid built', t: yearToT(-2560), level: 0, color: '#ffd93d' },
-        { name: 'Indus Valley Civilization peak', t: yearToT(-2500), level: 0, color: '#9b59b6' },
-        { name: 'Stonehenge completed', t: yearToT(-2500), level: 0, color: '#aaa' },
-        { name: 'Bronze Age begins', t: yearToT(-3300), level: 0, color: '#c0a060' },
-        { name: 'Code of Hammurabi', t: yearToT(-1754), level: 0, color: '#c0a060' },
-        { name: 'Shang Dynasty begins', t: yearToT(-1600), level: 0, color: '#ffd93d' },
-        { name: 'Trojan War (traditional)', t: yearToT(-1184), level: 0, color: '#ffd93d' },
-        { name: 'Iron Age begins', t: yearToT(-1200), level: 0, color: '#aaa' },
-        { name: 'Phoenician alphabet spreads', t: yearToT(-1050), level: 0, color: '#c0a060' },
-        // Classical antiquity
-        { name: 'First Olympic Games', t: yearToT(-776), level: 0, color: '#ffd93d' },
-        { name: 'Founding of Rome', t: yearToT(-753), level: 0, color: '#ff6b6b' },
-        { name: 'Buddha born', t: yearToT(-563), level: 0, color: '#9b59b6' },
-        { name: 'Confucius born', t: yearToT(-551), level: 0, color: '#9b59b6' },
-        { name: 'Athenian democracy established', t: yearToT(-508), level: 1, color: '#4d96ff' },
-        // Ionian Revolt (499–493 BCE) — level 2 summary, level 3 details
-        { name: 'Ionian Revolt begins', t: yearToT(-499), level: 2, color: '#6bcb77' },
-        { name: 'Aristagoras appeals to Athens', t: dateToT('-0499-01-15'), level: 3, color: '#6bcb77', tMin: dateToT('-0499-03-01'), tMax: dateToT('-0498-11-01') },
-        { name: 'Greeks burn Sardis', t: dateToT('-0498-06-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0498-04-01'), tMax: dateToT('-0498-08-01') },
-        { name: 'Battle of Ephesus', t: dateToT('-0498-09-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0498-06-01'), tMax: dateToT('-0498-12-01') },
-        { name: 'Cyprus joins revolt', t: dateToT('-0497-03-01'), level: 3, color: '#6bcb77', tMin: dateToT('-0498-01-01'), tMax: dateToT('-0497-06-01') },
-        { name: 'Battle of Salamis (Cyprus)', t: dateToT('-0497-07-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0497-05-01'), tMax: dateToT('-0497-09-01') },
-        { name: 'Carians defeated at Marsyas', t: dateToT('-0497-10-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0497-06-01'), tMax: dateToT('-0496-02-01') },
-        { name: 'Aristagoras killed in Thrace', t: yearToT(-497), level: 3, color: '#e74c3c', tMin: yearToT(-497), tMax: yearToT(-496) },
-        { name: 'Persian siege of Miletus begins', t: dateToT('-0494-06-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0494-04-01'), tMax: dateToT('-0494-08-01') },
-        { name: 'Battle of Lade', t: dateToT('-0494-08-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0494-07-01'), tMax: dateToT('-0494-09-01') },
-        { name: 'Fall of Miletus', t: dateToT('-0494-10-01'), level: 3, color: '#e74c3c', tMin: dateToT('-0494-09-01'), tMax: dateToT('-0494-12-01') },
-        { name: 'Ionian Revolt ends', t: yearToT(-493), level: 2, color: '#e74c3c' },
-        { name: 'Battle of Marathon', t: yearToT(-490), level: 1, color: '#6bcb77' },
-        { name: 'Battle of Thermopylae', t: yearToT(-480), level: 1, color: '#6bcb77' },
-        { name: 'Construction of Parthenon begins', t: yearToT(-447), level: 1, color: '#ffd93d' },
-        { name: 'Peloponnesian War begins', t: yearToT(-431), level: 1, color: '#6bcb77' },
-        { name: 'Death of Socrates', t: yearToT(-399), level: 1, color: '#4d96ff' },
-        { name: 'Birth of Aristotle', t: yearToT(-384), level: 1, color: '#4d96ff' },
-        { name: 'Alexander the Great born', t: yearToT(-356), level: 1, color: '#9b59b6' },
-        { name: 'Death of Alexander', t: yearToT(-323), level: 1, color: '#9b59b6' },
-        { name: 'Ashoka unifies India', t: yearToT(-261), level: 1, color: '#9b59b6' },
-        { name: 'Great Wall construction begins', t: yearToT(-221), level: 0, color: '#ffd93d' },
-        { name: 'Julius Caesar assassinated', t: dateToT('-0044-03-15'), level: 1, color: '#ff6b6b' },
-        { name: 'Augustus becomes Emperor', t: yearToT(-27), level: 1, color: '#ff6b6b' },
-        { name: 'Cleopatra dies', t: yearToT(-30), level: 1, color: '#e74c3c' },
-        { name: 'Jesus of Nazareth born', t: yearToT(-4), level: 0, color: '#9b59b6' },
-        { name: 'Eruption of Vesuvius', t: dateToT('0079-10-24'), level: 1, color: '#e74c3c', tMin: dateToT('0079-08-24'), tMax: dateToT('0079-10-24') },
-        { name: 'Vesuvius: Plinian column erupts (~1 PM)', t: dateToT('0079-10-24T13:00'), level: 3, color: '#e74c3c', tMin: dateToT('0079-08-24T13:00'), tMax: dateToT('0079-10-24T13:00') },
-        { name: 'Vesuvius: first pyroclastic surge (~1 AM)', t: dateToT('0079-10-25T01:00'), level: 3, color: '#e74c3c', tMin: dateToT('0079-08-25T01:00'), tMax: dateToT('0079-10-25T01:00') },
-        { name: 'Pompeii buried', t: dateToT('0079-10-25T07:00'), level: 3, color: '#e74c3c', tMin: dateToT('0079-08-25T07:00'), tMax: dateToT('0079-10-25T07:00') },
-        { name: 'Colosseum completed', t: yearToT(80), level: 1, color: '#ffd93d' },
-        // Late antiquity & early medieval
-        { name: 'Constantine converts to Christianity', t: yearToT(312), level: 1, color: '#9b59b6' },
-        { name: 'Fall of Western Rome', t: yearToT(476), level: 0, color: '#ff6b6b' },
-        { name: 'Muhammad born', t: yearToT(570), level: 0, color: '#9b59b6' },
-        { name: 'Islamic Golden Age begins', t: yearToT(750), level: 0, color: '#ffd93d' },
-        { name: 'Charlemagne crowned Emperor', t: dateToT('0800-12-25'), level: 1, color: '#ff6b6b' },
-        { name: 'Viking Age begins', t: yearToT(793), level: 1, color: '#6bcb77' },
-        // High medieval
-        { name: 'Norman Conquest of England', t: yearToT(1066), level: 1, color: '#6bcb77' },
-        { name: 'First Crusade', t: yearToT(1096), level: 1, color: '#e74c3c' },
-        { name: 'Genghis Khan unites Mongols', t: yearToT(1206), level: 0, color: '#e74c3c' },
-        { name: 'Magna Carta', t: dateToT('1215-06-15'), level: 1, color: '#6bcb77' },
-        { name: 'Black Death reaches Europe', t: yearToT(1347), level: 0, color: '#e74c3c' },
-        { name: 'Ming Dynasty begins', t: yearToT(1368), level: 1, color: '#ffd93d' },
-        // Renaissance & early modern
-        { name: 'Gutenberg printing press', t: yearToT(1440), level: 1, color: '#c0a060' },
-        { name: 'Fall of Constantinople', t: yearToT(1453), level: 0, color: '#e74c3c' },
-        { name: 'Columbus reaches Americas', t: dateToT('1492-10-12'), level: 1, color: '#4d96ff' },
-        { name: 'Vasco da Gama reaches India', t: yearToT(1498), level: 1, color: '#4d96ff' },
-        { name: 'Luther\'s 95 Theses', t: yearToT(1517), level: 1, color: '#9b59b6' },
-        { name: 'Magellan circumnavigates globe', t: yearToT(1522), level: 1, color: '#4d96ff' },
-        { name: 'Copernicus publishes heliocentric model', t: yearToT(1543), level: 1, color: '#4d96ff' },
-        { name: 'Shakespeare born', t: yearToT(1564), level: 1, color: '#ffd93d' },
-        { name: 'Galileo observes Jupiter\'s moons', t: yearToT(1610), level: 1, color: '#4d96ff' },
-        { name: 'Newton publishes Principia', t: yearToT(1687), level: 1, color: '#4d96ff' },
-        // Revolutions & enlightenment
-        { name: 'American Independence', t: dateToT('1776-07-04'), level: 1, color: '#4d96ff' },
-        { name: 'French Revolution', t: dateToT('1789-07-14'), level: 1, color: '#ff6b6b' },
-        { name: 'Haitian Revolution', t: yearToT(1791), level: 1, color: '#ff6b6b' },
-        { name: 'Napoleon crowned Emperor', t: yearToT(1804), level: 1, color: '#ff6b6b' },
-        { name: 'Battle of Waterloo', t: dateToT('1815-06-18'), level: 1, color: '#6bcb77' },
-        // Industrial age
-        { name: 'Steam locomotive (Stephenson)', t: yearToT(1825), level: 1, color: '#c0a060' },
-        { name: 'Darwin publishes Origin of Species', t: yearToT(1859), level: 1, color: '#4d96ff' },
-        { name: 'US Civil War begins', t: yearToT(1861), level: 1, color: '#e74c3c' },
-        { name: 'Abolition of US slavery', t: yearToT(1865), level: 1, color: '#6bcb77' },
-        { name: 'Meiji Restoration (Japan)', t: yearToT(1868), level: 1, color: '#ffd93d' },
-        { name: 'Telephone invented', t: yearToT(1876), level: 2, color: '#c0a060' },
-        { name: 'Light bulb invented', t: yearToT(1879), level: 2, color: '#ffd93d' },
-        // 20th century
-        { name: 'First powered flight', t: dateToT('1903-12-17'), level: 1, color: '#00ffcc' },
-        { name: 'Einstein publishes relativity', t: yearToT(1905), level: 1, color: '#4d96ff' },
-        { name: 'World War I begins', t: dateToT('1914-07-28'), level: 1, color: '#e74c3c' },
-        { name: 'Russian Revolution', t: yearToT(1917), level: 1, color: '#ff6b6b' },
-        { name: 'World War I ends', t: dateToT('1918-11-11'), level: 1, color: '#6bcb77' },
-        { name: 'Penicillin discovered', t: yearToT(1928), level: 2, color: '#4d96ff' },
-        { name: 'World War II begins', t: dateToT('1939-09-01'), level: 1, color: '#e74c3c' },
-        { name: 'D-Day', t: dateToT('1944-06-06'), level: 2, color: '#6bcb77' },
-        { name: 'Atomic bomb dropped on Hiroshima', t: dateToT('1945-08-06'), level: 1, color: '#e74c3c' },
-        { name: 'World War II ends', t: dateToT('1945-09-02'), level: 1, color: '#6bcb77' },
-        { name: 'United Nations founded', t: yearToT(1945), level: 1, color: '#4d96ff' },
-        { name: 'India gains independence', t: yearToT(1947), level: 1, color: '#6bcb77' },
-        { name: 'Israel established', t: yearToT(1948), level: 1, color: '#ff6b6b' },
-        { name: 'DNA structure discovered', t: yearToT(1953), level: 2, color: '#4d96ff' },
-        { name: 'Sputnik launched', t: dateToT('1957-10-04'), level: 2, color: '#00ffcc' },
-        { name: 'Cuban Missile Crisis', t: yearToT(1962), level: 2, color: '#e74c3c' },
-        { name: 'Moon Landing', t: dateToT('1969-07-20T20:17:00'), level: 1, color: '#00ffcc' },
-        { name: 'Fall of Saigon', t: yearToT(1975), level: 2, color: '#e74c3c' },
-        { name: 'First personal computer', t: yearToT(1977), level: 2, color: '#c0a060' },
-        { name: 'Chernobyl disaster', t: dateToT('1986-04-26'), level: 2, color: '#e74c3c' },
-        { name: 'Berlin Wall falls', t: dateToT('1989-11-09'), level: 1, color: '#ffd93d' },
-        { name: 'World Wide Web launched', t: yearToT(1991), level: 1, color: '#4d96ff' },
-        { name: 'Soviet Union dissolves', t: yearToT(1991), level: 1, color: '#ff6b6b' },
-        { name: 'Mandela becomes president', t: yearToT(1994), level: 2, color: '#6bcb77' },
-        // 21st century
-        { name: 'September 11 attacks', t: dateToT('2001-09-11'), level: 1, color: '#e74c3c' },
-        { name: 'Human genome sequenced', t: yearToT(2003), level: 2, color: '#4d96ff' },
-        { name: 'iPhone released', t: yearToT(2007), level: 2, color: '#c0a060' },
-        { name: 'Arab Spring begins', t: yearToT(2011), level: 2, color: '#ff6b6b' },
-        { name: 'Higgs boson discovered', t: yearToT(2012), level: 2, color: '#4d96ff' },
-        { name: 'COVID-19 pandemic begins', t: dateToT('2020-03-11'), level: 1, color: '#e74c3c' },
-        { name: 'ChatGPT released', t: dateToT('2022-11-30'), level: 2, color: '#00ffcc' },
-      ]
-
-      // Pre-parsed event colors
-      let eventRGB = events.map(ev => { const c = new THREE.Color(ev.color); return [c.r, c.g, c.b] as const })
-
-      const EVENT_SCHEMA = `{
-  "events": [
-    {
-      "name": "Event Name",
-      "year": 1969,
-      "date": "1969-07-20",
-      "level": 0,
-      "color": "#ff6b6b"
+      currentCameraPos.lerp(desiredCameraPos, CAMERA_LERP)
+      currentTarget.lerp(desiredTarget, CAMERA_LERP)
+      camera.position.copy(currentCameraPos)
+      camera.lookAt(currentTarget)
     }
-  ]
-}
 
-Fields:
-- name (required): Display name
-- year OR date (required): Use "year" for year-only precision (e.g. -753), "date" for specific dates (e.g. "1969-07-20" or "-0044-03-15T13:00")
-- level (required): 0=century, 1=decade, 2=year, 3=day scale. Controls visibility range and coil placement.
-- color (required): Hex color string
-- tMin, tMax (optional): Uncertainty range as year or date, same format as year/date`
+    function updateSmoke(nowSeconds: number) {
+      clerk.mouthAnchor.getWorldPosition(tmp)
+      for (const [index, line] of smokeLines.entries()) {
+        const points: THREE.Vector3[] = []
+        for (let step = 0; step < 7; step += 1) {
+          const t = step / 6
+          const wobble = nowSeconds * 1.3 + index * 1.1 + t * 4
+          points.push(new THREE.Vector3(
+            tmp.x + Math.sin(wobble) * 0.16 * t,
+            tmp.y + 0.3 + t * 1.9,
+            tmp.z + Math.cos(wobble * 1.1) * 0.16 * t,
+          ))
+        }
+        ;(line.geometry as THREE.BufferGeometry).setFromPoints(points)
+      }
+    }
 
-      function parseEventJson(json: string): CoilEvent[] | string {
+    function updateClock(nowSeconds: number) {
+      earthRig.spinGroup.rotation.y = nowSeconds / 40
+      earthRig.hourPivot.rotation.y = nowSeconds * ((Math.PI * 2) / 3600)
+      earthRig.minutePivot.rotation.y = nowSeconds * ((Math.PI * 2) / 60)
+      earthRig.secondPivot.rotation.y = nowSeconds * Math.PI * 2
+      earthRig.moonPivot.rotation.y = nowSeconds * 0.22
+      sun.rotation.y = nowSeconds * 0.06
+    }
+
+    function updateRemoteAvatars() {
+      for (const avatar of remotePlayers.values()) {
+        avatar.group.position.lerp(avatar.targetPosition, 0.18)
+        avatar.group.rotation.y += (avatar.yaw - avatar.group.rotation.y) * 0.16
+      }
+    }
+
+    function updateBarf(dt: number) {
+      const positions = barfSystem.positions
+      let drawCount = 0
+      for (let index = particles.length - 1; index >= 0; index -= 1) {
+        const particle = particles[index]
+        particle.life -= dt
+        if (particle.life <= 0) {
+          particles.splice(index, 1)
+          continue
+        }
+        particle.velocity.y -= 3.5 * dt
+        particle.velocity.multiplyScalar(0.992)
+        particle.position.addScaledVector(particle.velocity, dt)
+        const tip = particle.position
+        const tail = particle.position.clone().addScaledVector(particle.velocity, -0.045)
+        const size = particle.size
+        const base = drawCount * BARF_SEGMENTS_PER_PARTICLE * 6
+        positions[base] = tail.x
+        positions[base + 1] = tail.y
+        positions[base + 2] = tail.z
+        positions[base + 3] = tip.x
+        positions[base + 4] = tip.y
+        positions[base + 5] = tip.z
+
+        positions[base + 6] = tip.x - size
+        positions[base + 7] = tip.y
+        positions[base + 8] = tip.z
+        positions[base + 9] = tip.x + size
+        positions[base + 10] = tip.y
+        positions[base + 11] = tip.z
+
+        positions[base + 12] = tip.x
+        positions[base + 13] = tip.y - size
+        positions[base + 14] = tip.z
+        positions[base + 15] = tip.x
+        positions[base + 16] = tip.y + size
+        positions[base + 17] = tip.z
+
+        positions[base + 18] = tip.x
+        positions[base + 19] = tip.y
+        positions[base + 20] = tip.z - size
+        positions[base + 21] = tip.x
+        positions[base + 22] = tip.y
+        positions[base + 23] = tip.z + size
+        drawCount += 1
+      }
+      const attribute = barfSystem.lines.geometry.getAttribute('position') as THREE.BufferAttribute
+      attribute.needsUpdate = true
+      barfSystem.lines.geometry.setDrawRange(0, drawCount * BARF_SEGMENTS_PER_PARTICLE * 2)
+    }
+
+    async function loadSpaceData() {
+      try {
+        const response = await fetch(apiUrl)
+        if (!response.ok) throw new Error(`space payload failed: ${response.status}`)
+        const payload = (await response.json()) as SpacePayload
+        if (spaceClouds) {
+          orbitLayers.remove(spaceClouds.root)
+          disposeScene(spaceClouds.root)
+        }
+        spacePayload = payload
+        spaceClouds = createSpaceCloudGroup(payload)
+        orbitLayers.add(spaceClouds.root)
+        updateOrbitVisibility(storyRef.current)
+        setSpaceReady(true)
+        setSpaceNote('Live trajectories drawn from the gateway.')
+      } catch (error) {
+        setSpaceReady(false)
+        setSpaceNote(error instanceof Error ? error.message : String(error))
+      }
+    }
+
+    function connectSocket() {
+      socket = new WebSocket(wsUrl)
+
+      socket.addEventListener('open', () => {
+        socket?.send(JSON.stringify({
+          type: 'hello',
+          faceSeed: localFaceSeed,
+          name: `Rider-${String(localFaceSeed).slice(-4)}`,
+          stage: storyRef.current.stage,
+        }))
+      })
+
+      socket.addEventListener('message', (event) => {
+        let payload: unknown
         try {
-          const data = JSON.parse(json)
-          const arr = data.events || data
-          if (!Array.isArray(arr)) return 'Expected { "events": [...] } or an array'
-          const parsed: CoilEvent[] = []
-          for (const e of arr) {
-            if (!e.name || e.level == null || !e.color) return `Missing name/level/color on: ${JSON.stringify(e).slice(0, 60)}`
-            const t = e.date ? dateToT(String(e.date)) : e.year != null ? yearToT(e.year) : null
-            if (t == null) return `Missing year or date on: ${e.name}`
-            const ev: CoilEvent = { name: e.name, t, level: e.level, color: e.color }
-            if (e.tMin != null) ev.tMin = typeof e.tMin === 'string' ? dateToT(e.tMin) : yearToT(e.tMin)
-            if (e.tMax != null) ev.tMax = typeof e.tMax === 'string' ? dateToT(e.tMax) : yearToT(e.tMax)
-            parsed.push(ev)
+          payload = JSON.parse(event.data)
+        } catch {
+          return
+        }
+
+        if (!payload || typeof payload !== 'object') return
+        const message = payload as Record<string, unknown>
+        if (message.type === 'welcome') {
+          localId = typeof message.id === 'string' ? message.id : null
+          const playersState = Array.isArray(message.players) ? (message.players as RemotePlayerState[]) : []
+          syncRemotePlayers(playersState)
+          return
+        }
+        if (message.type === 'snapshot') {
+          const playersState = Array.isArray(message.players) ? (message.players as RemotePlayerState[]) : []
+          syncRemotePlayers(playersState)
+          return
+        }
+        if (message.type === 'state' && message.player && typeof message.player === 'object') {
+          upsertRemotePlayer(message.player as RemotePlayerState)
+          const nextPeers = remotePlayers.size + 1
+          if (nextPeers !== lastPeerCount) {
+            lastPeerCount = nextPeers
+            setPeers(nextPeers)
           }
-          return parsed
-        } catch (err) { return String(err) }
-      }
-
-      function setEvents(newEvents: CoilEvent[]) {
-        events = newEvents
-        eventRGB = events.map(ev => { const c = new THREE.Color(ev.color); return [c.r, c.g, c.b] as const })
-      }
-
-      // ── DOM label pool ──────────────────────────────────────────────────
-      const POOL_SIZE = 120
-      const labelPool: HTMLDivElement[] = []
-      for (let i = 0; i < POOL_SIZE; i++) {
-        const div = document.createElement('div')
-        div.style.cssText = 'position:absolute;font-family:monospace;pointer-events:none;white-space:nowrap;display:none'
-        overlay.appendChild(div)
-        labelPool.push(div)
-      }
-
-      // Event connector canvas (dots on coil + lines to labels)
-      const connCanvas = document.createElement('canvas')
-      connCanvas.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none'
-      overlay.appendChild(connCanvas)
-
-      // Fixed focus label + connecting line on the right side
-      const focusChevron = document.createElement('div')
-      focusChevron.innerHTML = '<svg width="28" height="20" viewBox="0 0 28 20"><path d="M28,0 L6,10 L28,20 L22,10 Z" fill="#ff4444"/></svg>'
-      focusChevron.style.cssText = 'position:absolute;pointer-events:none;transform:translate(-100%,-50%);line-height:0'
-      let chevronX = -1, chevronY = -1
-      overlay.appendChild(focusChevron)
-      const focusLabelDiv = document.createElement('div')
-      focusLabelDiv.style.cssText = 'position:absolute;right:20px;font-family:monospace;color:#ff4444;font-size:14px;font-weight:bold;pointer-events:none;white-space:nowrap;transform:translateY(-50%)'
-      overlay.appendChild(focusLabelDiv)
-      let poolIdx = 0
-      const _projVec = new THREE.Vector3()
-
-      const rt: Runtime = { renderer, scene, camera, controls, levels: [], pane }
-      runtimeRef.current = rt
-
-      rt.levels = createLevels(scene)
-      dispatchCompute(rt)
-
-      // Initial camera via updateFocus
-      updateFocus(rt)
-
-      // ── Controls ──────────────────────────────────────────────────────────
-      let zoomTarget = cameraLevel
-      canvas.addEventListener('wheel', (e) => {
-        e.preventDefault()
-        animating = false // cancel any ongoing animation
-        const step = THREE.MathUtils.clamp(-e.deltaY * 0.003, -0.5, 0.5)
-        zoomTarget = THREE.MathUtils.clamp(zoomTarget + step, 0, HIERARCHY.length - 1)
-      }, { passive: false })
-
-      let dragging = false, dragOriginX = 0, dragOriginY = 0, dragCurX = 0, dragCurY = 0, dragDisplacement = 0, focusDragging = false
-      let panInertia = 0
-      const focusBinding = pane.addBinding(params, 'focusT', { min: 0, max: 1, step: 0.0001, label: 'focus' })
-      focusBinding.on('change', () => { if (!focusDragging) updateFocus(rt) })
-
-      // ── Pan indicator widget ─────────────────────────────────────────────
-      const panWidget = document.createElement('div')
-      panWidget.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;pointer-events:none;display:none;z-index:5'
-      const panSvg = document.createElementNS('http://www.w3.org/2000/svg', 'svg')
-      panSvg.setAttribute('width', '100%'); panSvg.setAttribute('height', '100%')
-      panSvg.style.cssText = 'position:absolute;top:0;left:0'
-      panWidget.appendChild(panSvg)
-      const panLabel = document.createElement('div')
-      panLabel.style.cssText = 'position:absolute;font-family:monospace;font-size:11px;color:#ccc;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:4px;padding:2px 6px;white-space:nowrap;transform:translate(-50%,-100%);margin-top:-12px'
-      panWidget.appendChild(panLabel)
-      canvas.parentElement!.appendChild(panWidget)
-
-      function formatPanRate(yearsPerSec: number): string {
-        const abs = Math.abs(yearsPerSec)
-        if (abs < 1e-6) return '0'
-        if (abs < 1 / 8766) return `${(abs * 8766 * 60).toFixed(1)} min/s`
-        if (abs < 1 / 365.25) return `${(abs * 8766).toFixed(1)} hr/s`
-        if (abs < 1) return `${(abs * 365.25).toFixed(1)} day/s`
-        if (abs < 100) return `${abs.toFixed(1)} yr/s`
-        if (abs < 10000) return `${(abs / 100).toFixed(1)} c/s`
-        return `${(abs / 1000).toFixed(0)}k yr/s`
-      }
-
-      function updatePanWidget() {
-        if (!dragging) { panWidget.style.display = 'none'; return }
-        panWidget.style.display = 'block'
-        const ox = dragOriginX, oy = dragOriginY, cx = dragCurX, cy = dragCurY
-        const ddx = cx - ox, ddy = cy - oy
-        const dist = Math.sqrt(ddx * ddx + ddy * ddy)
-
-        // Compute actual pan rate in years/second (~60fps)
-        const totals = getCachedTotals()
-        const panLvl = Math.min(Math.round(cameraLevel), totals.length - 1)
-        const dtPerFrame = dragDisplacement * params.panSpeed / totals[panLvl] * TOTAL_YEARS
-        const yearsPerSec = dtPerFrame * 60
-        const dir = yearsPerSec > 0.0001 ? ' ◀' : yearsPerSec < -0.0001 ? ' ▶' : ''
-        panLabel.textContent = formatPanRate(yearsPerSec) + dir
-        panLabel.style.left = `${ox}px`
-        panLabel.style.top = `${oy}px`
-
-        // Build SVG: origin dot, line, spaced dots
-        let svg = `<circle cx="${ox}" cy="${oy}" r="4" fill="#888" stroke="#444" stroke-width="1"/>`
-        if (dist > 5) {
-          svg += `<line x1="${ox}" y1="${oy}" x2="${cx}" y2="${cy}" stroke="#555" stroke-width="1" stroke-dasharray="4,3"/>`
-          const nx = ddx / dist, ny = ddy / dist
-          let pos = 8
-          let gap = 8
-          while (pos < dist - 4) {
-            const dotX = ox + nx * pos, dotY = oy + ny * pos
-            svg += `<circle cx="${dotX}" cy="${dotY}" r="2" fill="rgba(200,200,200,0.5)"/>`
-            pos += gap
-            gap += 2
+          return
+        }
+        if (message.type === 'leave' && typeof message.id === 'string') {
+          const existing = remotePlayers.get(message.id)
+          if (existing) {
+            root.remove(existing.group)
+            remotePlayers.delete(message.id)
+            lastPeerCount = remotePlayers.size + 1
+            setPeers(lastPeerCount)
           }
-          svg += `<circle cx="${cx}" cy="${cy}" r="3" fill="#aaa" stroke="#555" stroke-width="1"/>`
+          return
         }
-        panSvg.innerHTML = svg
-      }
-
-      canvas.addEventListener('pointerdown', (e) => {
-        if (e.button !== 2) return
-        dragging = true; focusDragging = true
-        dragOriginX = e.clientX; dragOriginY = e.clientY
-        dragCurX = e.clientX; dragCurY = e.clientY; dragDisplacement = 0
-        canvas.requestPointerLock()
-        e.preventDefault()
-      })
-      canvas.addEventListener('pointermove', (e) => {
-        if (!dragging) return
-        dragCurX += e.movementX; dragCurY += e.movementY
-        const dy = (dragCurY - dragOriginY) * 0.01   // up = forward
-        const dx = -(dragCurX - dragOriginX) * 0.005  // right = forward at half speed
-        dragDisplacement = dy + dx
-        updatePanWidget()
-      })
-      const stopDrag = () => {
-        if (dragging) {
-          panInertia = dragDisplacement
-          if (document.pointerLockElement === canvas) document.exitPointerLock()
-        }
-        dragging = false; focusDragging = false; updatePanWidget()
-      }
-      canvas.addEventListener('pointerup', stopDrag); canvas.addEventListener('pointercancel', stopDrag)
-      canvas.addEventListener('contextmenu', (e) => e.preventDefault())
-
-      // Click event labels: animate to event, zoom out if needed but never zoom in
-      overlay.addEventListener('click', (e) => {
-        const target = e.target as HTMLElement
-        const t = target.dataset?.eventT
-        const lvl = target.dataset?.eventLevel
-        if (t) {
-          const evLevel = lvl ? parseFloat(lvl) : cameraLevel
-          const targetLevel = Math.min(evLevel, cameraLevel) // only zoom out, never in
-          animateToT(parseFloat(t), targetLevel)
+        if (message.type === 'barf' && Array.isArray(message.position)) {
+          const position = message.position as Vec3Tuple
+          triggerBarf(
+            true,
+            new THREE.Vector3(position[0], position[1] + 1, position[2]),
+            typeof message.yaw === 'number' ? message.yaw : 0,
+          )
         }
       })
 
-      pane.addBinding(params, 'coilRadius', { min: 0.1, max: 5, step: 0.1, label: 'coil radius' }).on('change', () => { syncHelixUniforms(); dispatchCompute(rt) })
-      pane.addBinding(params, 'turnSpacing', { min: 0.1, max: 20, step: 0.1, label: 'turn spacing' }).on('change', () => { syncHelixUniforms(); dispatchCompute(rt) })
-      pane.addBinding(params, 'fillFactor', { min: 0.1, max: 1.5, step: 0.01, label: 'fill factor' }).on('change', () => { syncOffsets(); dispatchCompute(rt) })
-
-      // ── Camera level panel (draggable) ────────────────────────────────────
-      const levelPanel = document.createElement('div')
-      levelPanel.style.cssText = 'position:absolute;left:20px;top:20px;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:6px;padding:8px;font-family:monospace;font-size:12px;color:#ccc;cursor:move;user-select:none;z-index:10'
-      const timeDisplay = document.createElement('div')
-      timeDisplay.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #333'
-      const timeLabel = document.createElement('div')
-      timeLabel.textContent = 'Current Time'
-      timeLabel.style.cssText = 'font-weight:bold;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px'
-      const timeValue = document.createElement('div')
-      timeValue.style.cssText = 'font-size:13px;color:#ff4444;font-weight:bold'
-      timeDisplay.appendChild(timeLabel)
-      timeDisplay.appendChild(timeValue)
-      levelPanel.appendChild(timeDisplay)
-
-      // ── Playback controls ────────────────────────────────────────────────
-      // Speed auto-derived from camera level (seconds of sim-time per real second)
-      const LEVEL_SPEEDS = [
-        { label: '100yr/s', value: 100 * 365.25 * 86400 },
-        { label: '10yr/s', value: 10 * 365.25 * 86400 },
-        { label: '1yr/s', value: 365.25 * 86400 },
-        { label: '1day/s', value: 86400 },
-        { label: '1hr/s', value: 3600 },
-        { label: '1min/s', value: 60 },
-        { label: '1s/s', value: 1 },
-      ]
-      let playing = false
-      let speedMult = 1.0
-
-      const playbackDiv = document.createElement('div')
-      playbackDiv.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #333'
-
-      const playBtn = document.createElement('div')
-      playBtn.style.cssText = 'text-align:center;padding:4px 8px;border-radius:3px;cursor:pointer;background:rgba(255,255,255,0.08);color:#ccc;font-size:12px;font-family:monospace;transition:background 0.15s;user-select:none'
-      playBtn.addEventListener('click', (e) => { e.stopPropagation(); playing = !playing; updatePlayBtn() })
-      playBtn.addEventListener('mouseenter', () => { playBtn.style.background = 'rgba(255,255,255,0.2)' })
-      playBtn.addEventListener('mouseleave', () => { playBtn.style.background = 'rgba(255,255,255,0.08)' })
-
-      const sliderRow = document.createElement('div')
-      sliderRow.style.cssText = 'display:flex;align-items:center;gap:6px;margin-top:6px'
-      const speedSlider = document.createElement('input')
-      speedSlider.type = 'range'
-      speedSlider.min = '0.1'; speedSlider.max = '1'; speedSlider.step = '0.05'; speedSlider.value = '1'
-      speedSlider.style.cssText = 'flex:1;accent-color:#888;height:4px'
-      speedSlider.addEventListener('input', () => { speedMult = parseFloat(speedSlider.value); updatePlayBtn() })
-      const speedLabel = document.createElement('div')
-      speedLabel.style.cssText = 'font-size:10px;color:#888;min-width:28px;text-align:right;font-family:monospace'
-      sliderRow.appendChild(speedSlider)
-      sliderRow.appendChild(speedLabel)
-
-      function updatePlayBtn() {
-        const lvl = Math.min(Math.round(cameraLevel), LEVEL_SPEEDS.length - 1)
-        const base = LEVEL_SPEEDS[lvl].label
-        const mult = speedMult < 1 ? `${speedMult.toFixed(1)}x` : '1x'
-        playBtn.textContent = playing ? `⏸ ${base}` : `▶ ${base}`
-        speedLabel.textContent = mult
-      }
-
-      playbackDiv.appendChild(playBtn)
-      playbackDiv.appendChild(sliderRow)
-      levelPanel.appendChild(playbackDiv)
-      updatePlayBtn()
-
-      onSpaceKey = (e: KeyboardEvent) => {
-        if (e.code === 'Space' && !e.repeat) { e.preventDefault(); playing = !playing; updatePlayBtn() }
-      }
-      window.addEventListener('keydown', onSpaceKey)
-
-      // ── Date mode toggle ─────────────────────────────────────────────────
-      let dateMode: 'absolute' | 'relative' = 'absolute'
-      const dateModeDiv = document.createElement('div')
-      dateModeDiv.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #333'
-      const dateModeBtn = document.createElement('div')
-      dateModeBtn.style.cssText = 'text-align:center;padding:4px 8px;border-radius:3px;cursor:pointer;background:rgba(255,255,255,0.08);color:#ccc;font-size:11px;font-family:monospace;transition:background 0.15s;user-select:none'
-      dateModeBtn.addEventListener('click', (e) => { e.stopPropagation(); dateMode = dateMode === 'absolute' ? 'relative' : 'absolute'; dateModeBtn.textContent = dateMode === 'absolute' ? 'Dates: absolute' : 'Dates: relative' })
-      dateModeBtn.addEventListener('mouseenter', () => { dateModeBtn.style.background = 'rgba(255,255,255,0.2)' })
-      dateModeBtn.addEventListener('mouseleave', () => { dateModeBtn.style.background = 'rgba(255,255,255,0.08)' })
-      dateModeBtn.textContent = 'Dates: absolute'
-      dateModeDiv.appendChild(dateModeBtn)
-      levelPanel.appendChild(dateModeDiv)
-
-      // ── Custom events ────────────────────────────────────────────────────
-      const customDiv = document.createElement('div')
-      customDiv.style.cssText = 'margin-bottom:8px;padding-bottom:8px;border-bottom:1px solid #333'
-      const customBtnRow = document.createElement('div')
-      customBtnRow.style.cssText = 'display:flex;gap:4px'
-      const customToggleBtn = document.createElement('div')
-      customToggleBtn.textContent = 'Custom events'
-      customToggleBtn.style.cssText = 'flex:1;text-align:center;padding:4px 8px;border-radius:3px;cursor:pointer;background:rgba(255,255,255,0.08);color:#ccc;font-size:11px;font-family:monospace;transition:background 0.15s;user-select:none'
-      customToggleBtn.addEventListener('mouseenter', () => { customToggleBtn.style.background = 'rgba(255,255,255,0.2)' })
-      customToggleBtn.addEventListener('mouseleave', () => { customToggleBtn.style.background = 'rgba(255,255,255,0.08)' })
-      const copySchemaBtn = document.createElement('div')
-      copySchemaBtn.textContent = 'Schema'
-      copySchemaBtn.style.cssText = 'padding:4px 8px;border-radius:3px;cursor:pointer;background:rgba(255,255,255,0.08);color:#888;font-size:11px;font-family:monospace;transition:background 0.15s;user-select:none;min-width:52px;text-align:center'
-      copySchemaBtn.addEventListener('mouseenter', () => { copySchemaBtn.style.background = 'rgba(255,255,255,0.2)' })
-      copySchemaBtn.addEventListener('mouseleave', () => { copySchemaBtn.style.background = 'rgba(255,255,255,0.08)' })
-      // Set fixed width from initial content before any text changes
-      requestAnimationFrame(() => { copySchemaBtn.style.width = `${copySchemaBtn.offsetWidth}px` })
-      copySchemaBtn.addEventListener('click', (e) => {
-        e.stopPropagation()
-        navigator.clipboard.writeText(EVENT_SCHEMA).then(() => {
-          copySchemaBtn.textContent = 'Copied!'
-          setTimeout(() => { copySchemaBtn.textContent = 'Schema' }, 1500)
-        })
-      })
-      customBtnRow.appendChild(customToggleBtn)
-      customBtnRow.appendChild(copySchemaBtn)
-      customDiv.appendChild(customBtnRow)
-
-      const customPane = document.createElement('div')
-      customPane.style.cssText = 'display:none;margin-top:6px'
-      const customTextarea = document.createElement('textarea')
-      customTextarea.style.cssText = 'width:100%;height:120px;background:rgba(0,0,0,0.4);border:1px solid #555;border-radius:3px;color:#ccc;font-family:monospace;font-size:10px;padding:4px;resize:vertical;box-sizing:border-box'
-      customTextarea.placeholder = 'Paste event JSON here...'
-      const customSubmitRow = document.createElement('div')
-      customSubmitRow.style.cssText = 'display:flex;gap:4px;margin-top:4px'
-      const submitBtnStyle = 'flex:1;text-align:center;padding:4px 8px;border-radius:3px;cursor:pointer;font-size:11px;font-family:monospace;transition:background 0.15s;user-select:none'
-      const addEventsBtn = document.createElement('div')
-      addEventsBtn.textContent = 'Add'
-      addEventsBtn.style.cssText = submitBtnStyle + ';background:rgba(100,200,100,0.15);color:#6bcb77'
-      addEventsBtn.addEventListener('mouseenter', () => { addEventsBtn.style.background = 'rgba(100,200,100,0.3)' })
-      addEventsBtn.addEventListener('mouseleave', () => { addEventsBtn.style.background = 'rgba(100,200,100,0.15)' })
-      const replaceEventsBtn = document.createElement('div')
-      replaceEventsBtn.textContent = 'Replace'
-      replaceEventsBtn.style.cssText = submitBtnStyle + ';background:rgba(200,100,100,0.15);color:#e74c3c'
-      replaceEventsBtn.addEventListener('mouseenter', () => { replaceEventsBtn.style.background = 'rgba(200,100,100,0.3)' })
-      replaceEventsBtn.addEventListener('mouseleave', () => { replaceEventsBtn.style.background = 'rgba(200,100,100,0.15)' })
-      const customStatus = document.createElement('div')
-      customStatus.style.cssText = 'font-size:10px;color:#e74c3c;margin-top:4px;display:none'
-      function handleCustomSubmit(replace: boolean) {
-        const result = parseEventJson(customTextarea.value)
-        if (typeof result === 'string') { customStatus.textContent = result; customStatus.style.display = 'block'; return }
-        setEvents(replace ? result : [...events, ...result])
-        customStatus.style.display = 'none'; customPane.style.display = 'none'
-        customToggleBtn.textContent = `Custom events (${events.length})`
-      }
-      addEventsBtn.addEventListener('click', (e) => { e.stopPropagation(); handleCustomSubmit(false) })
-      replaceEventsBtn.addEventListener('click', (e) => { e.stopPropagation(); handleCustomSubmit(true) })
-      customSubmitRow.appendChild(addEventsBtn)
-      customSubmitRow.appendChild(replaceEventsBtn)
-      customPane.appendChild(customTextarea)
-      customPane.appendChild(customSubmitRow)
-      customPane.appendChild(customStatus)
-      customDiv.appendChild(customPane)
-      levelPanel.appendChild(customDiv)
-
-      customToggleBtn.addEventListener('click', (e) => {
-        e.stopPropagation()
-        customPane.style.display = customPane.style.display === 'none' ? 'block' : 'none'
-      })
-
-      const panelTitle = document.createElement('div')
-      panelTitle.textContent = 'Camera Level'
-      panelTitle.style.cssText = 'font-weight:bold;margin-bottom:6px;font-size:11px;color:#888;text-transform:uppercase;letter-spacing:1px'
-      levelPanel.appendChild(panelTitle)
-
-      const levelNames = ['Century', 'Decade', 'Year', 'Day', 'Hour', 'Minute', 'Second']
-      const levelBtns: HTMLDivElement[] = []
-      levelNames.forEach((name, i) => {
-        const btn = document.createElement('div')
-        btn.textContent = name
-        btn.style.cssText = 'padding:4px 10px;margin:2px 0;border-radius:3px;cursor:pointer;transition:background 0.15s'
-        btn.addEventListener('mouseenter', () => { if (Math.round(cameraLevel) !== i) btn.style.background = 'rgba(255,255,255,0.1)' })
-        btn.addEventListener('mouseleave', () => { if (Math.round(cameraLevel) !== i) btn.style.background = 'none' })
-        btn.addEventListener('click', (e) => { e.stopPropagation(); animateToT(params.focusT, i) })
-        levelPanel.appendChild(btn)
-        levelBtns.push(btn)
-      })
-      canvas.parentElement!.appendChild(levelPanel)
-
-      // Highlight active level
-      function updateLevelHighlight() {
-        const active = Math.round(cameraLevel)
-        levelBtns.forEach((btn, i) => {
-          btn.style.background = i === active ? 'rgba(255,255,255,0.15)' : 'none'
-          btn.style.color = i === active ? '#fff' : '#aaa'
-        })
-      }
-      updateLevelHighlight()
-
-      // ── Minimap timeline ─────────────────────────────────────────────────
-      const minimap = document.createElement('div')
-      minimap.style.cssText = 'position:absolute;bottom:8px;left:50%;transform:translateX(-50%);width:90%;height:28px;background:rgba(17,17,17,0.85);border:1px solid #444;border-radius:4px;z-index:10;overflow:visible'
-      const miniCanvas = document.createElement('canvas')
-      miniCanvas.style.cssText = 'width:100%;height:100%;cursor:default'
-      minimap.appendChild(miniCanvas)
-      const miniTooltip = document.createElement('div')
-      miniTooltip.style.cssText = 'position:absolute;bottom:100%;left:0;margin-bottom:4px;font-family:monospace;font-size:11px;padding:2px 6px;background:rgba(17,17,17,0.95);border:1px solid #444;border-radius:4px;white-space:nowrap;pointer-events:none;opacity:0;transition:opacity 0.1s;transform:translateX(-50%)'
-      minimap.appendChild(miniTooltip)
-      // Hit-test data: updated each frame
-      const miniDots: { px: number; py: number; ev: CoilEvent }[] = []
-      let miniHovered: CoilEvent | null = null
-      minimap.addEventListener('mousemove', (e) => {
-        const rect = minimap.getBoundingClientRect()
-        const mx = (e.clientX - rect.left) * devicePixelRatio
-        const my = (e.clientY - rect.top) * devicePixelRatio
-        let best: CoilEvent | null = null, bestDist = 12 * devicePixelRatio
-        for (const d of miniDots) {
-          const dx = mx - d.px, dy = my - d.py
-          const dist = Math.sqrt(dx * dx + dy * dy)
-          if (dist < bestDist) { bestDist = dist; best = d.ev }
-        }
-        miniHovered = best
-        miniCanvas.style.cursor = best ? 'pointer' : 'default'
-        if (best) {
-          miniTooltip.textContent = best.name
-          miniTooltip.style.color = best.color
-          miniTooltip.style.left = `${(e.clientX - rect.left)}px`
-          miniTooltip.style.opacity = '1'
-        } else {
-          miniTooltip.style.opacity = '0'
+      socket.addEventListener('close', () => {
+        if (!disposed) {
+          window.setTimeout(connectSocket, 1200)
         }
       })
-      minimap.addEventListener('mouseleave', () => { miniHovered = null; miniTooltip.style.opacity = '0'; miniCanvas.style.cursor = 'default' })
-      minimap.addEventListener('click', () => {
-        if (miniHovered) {
-          const evLevel = miniHovered.level
-          const targetLevel = Math.min(evLevel, cameraLevel)
-          animateToT(miniHovered.t, targetLevel)
-        }
-      })
-      canvas.parentElement!.appendChild(minimap)
-
-      const K_WARP = 3 // exponential compression factor
-
-      function yearToMiniPx(year: number, focusYr: number, halfW: number, halfRange: number): number {
-        const dy = year - focusYr
-        return halfW + halfW * Math.asinh((dy / halfRange) * Math.sinh(K_WARP)) / K_WARP
-      }
-
-      function updateMinimap() {
-        const rect = minimap.getBoundingClientRect()
-        const w = Math.floor(rect.width * devicePixelRatio)
-        const h = Math.floor(rect.height * devicePixelRatio)
-        if (miniCanvas.width !== w || miniCanvas.height !== h) {
-          miniCanvas.width = w; miniCanvas.height = h
-        }
-        const ctx = miniCanvas.getContext('2d')!
-        ctx.clearRect(0, 0, w, h)
-        const halfW = w / 2
-        const focusYr = START_YEAR + params.focusT * TOTAL_YEARS
-        const camLvl = Math.round(cameraLevel)
-        // Symmetric sliding window: halfRange shrinks with zoom level
-        const levelRanges = [TOTAL_YEARS / 2, 2000, 200, 5, 0.5, 0.01, 0.0002]
-        const lo = Math.floor(cameraLevel), hi = Math.min(lo + 1, levelRanges.length - 1)
-        const frac = cameraLevel - lo
-        const halfRange = levelRanges[lo] + frac * (levelRanges[hi] - levelRanges[lo])
-        const edgeYrL = focusYr - halfRange, edgeYrR = focusYr + halfRange
-
-        // Tick marks: centuries always, decades if room
-        ctx.strokeStyle = 'rgba(255,255,255,0.12)'
-        ctx.lineWidth = 1
-        const firstCentury = Math.ceil(Math.max(START_YEAR, edgeYrL) / 100) * 100
-        const lastCentury = Math.min(END_YEAR, edgeYrR)
-        for (let yr = firstCentury; yr <= lastCentury; yr += 100) {
-          const px = yearToMiniPx(yr, focusYr, halfW, halfRange)
-          if (px < 0 || px > w) continue
-          ctx.beginPath(); ctx.moveTo(px, h * 0.3); ctx.lineTo(px, h); ctx.stroke()
-        }
-        if (camLvl >= 1) {
-          ctx.strokeStyle = 'rgba(255,255,255,0.06)'
-          const firstDecade = Math.ceil(Math.max(START_YEAR, edgeYrL) / 10) * 10
-          const lastDecade = Math.min(END_YEAR, edgeYrR)
-          for (let yr = firstDecade; yr <= lastDecade; yr += 10) {
-            if (yr % 100 === 0) continue
-            const px = yearToMiniPx(yr, focusYr, halfW, halfRange)
-            if (px < 0 || px > w) continue
-            const prevPx = yearToMiniPx(yr - 10, focusYr, halfW, halfRange)
-            if (Math.abs(px - prevPx) < 3) continue
-            ctx.beginPath(); ctx.moveTo(px, h * 0.55); ctx.lineTo(px, h); ctx.stroke()
-          }
-        }
-
-        // Events
-        miniDots.length = 0
-        for (const ev of events) {
-          const evYr = START_YEAR + ev.t * TOTAL_YEARS
-          const px = yearToMiniPx(evYr, focusYr, halfW, halfRange)
-          if (px < -2 || px > w + 2) continue
-          const r = ev.level === 0 ? 3 : ev.level === 1 ? 2 : 1.5
-          ctx.fillStyle = ev.color
-          ctx.globalAlpha = 0.9
-          const bandCenter = 0.25 + ev.level * (0.5 / 3)
-          const bandHalf = 0.06
-          const hash = Math.sin(ev.t * 127.1 + ev.level * 311.7) * 43758.5453 % 1
-          const dotY = h * (bandCenter + (hash - 0.5) * bandHalf * 2)
-          ctx.beginPath(); ctx.arc(px, dotY, r * devicePixelRatio, 0, Math.PI * 2); ctx.fill()
-          miniDots.push({ px, py: dotY, ev })
-        }
-        ctx.globalAlpha = 1
-
-        // Helix boundary indicators
-        const startPx = yearToMiniPx(START_YEAR, focusYr, halfW, halfRange)
-        const endPx = yearToMiniPx(END_YEAR, focusYr, halfW, halfRange)
-        ctx.strokeStyle = 'rgba(255,255,255,0.4)'
-        ctx.lineWidth = 1.5 * devicePixelRatio
-        if (startPx > 0 && startPx < w) {
-          ctx.beginPath(); ctx.moveTo(startPx, 0); ctx.lineTo(startPx, h); ctx.stroke()
-        }
-        if (endPx > 0 && endPx < w) {
-          ctx.beginPath(); ctx.moveTo(endPx, 0); ctx.lineTo(endPx, h); ctx.stroke()
-        }
-
-        // Focus indicator (center line)
-        ctx.strokeStyle = '#ff4444'
-        ctx.lineWidth = 2 * devicePixelRatio
-        ctx.beginPath(); ctx.moveTo(halfW, 0); ctx.lineTo(halfW, h); ctx.stroke()
-
-        // Edge year labels (show actual window edges, not clamped)
-        ctx.fillStyle = 'rgba(255,255,255,0.3)'
-        ctx.font = `${9 * devicePixelRatio}px monospace`
-        ctx.textBaseline = 'middle'
-        ctx.textAlign = 'left'
-        ctx.fillText(yearLabel(Math.round(edgeYrL)), 4 * devicePixelRatio, h * 0.45)
-        ctx.textAlign = 'right'
-        ctx.fillText(yearLabel(Math.round(edgeYrR)), w - 4 * devicePixelRatio, h * 0.45)
-      }
-
-      // Draggable
-      let panelDragging = false, panelDragX = 0, panelDragY = 0
-      const dragTargets = new Set([levelPanel, panelTitle, timeDisplay, timeLabel, timeValue, playbackDiv])
-      levelPanel.addEventListener('pointerdown', (e) => {
-        if (!dragTargets.has(e.target as any)) return
-        panelDragging = true
-        panelDragX = e.clientX - levelPanel.offsetLeft
-        panelDragY = e.clientY - levelPanel.offsetTop
-        e.preventDefault()
-      })
-      window.addEventListener('pointermove', (e) => {
-        if (!panelDragging) return
-        levelPanel.style.left = `${e.clientX - panelDragX}px`
-        levelPanel.style.top = `${e.clientY - panelDragY}px`
-        levelPanel.style.bottom = 'auto'
-      })
-      window.addEventListener('pointerup', () => { panelDragging = false })
-
-      // ── Animate ───────────────────────────────────────────────────────────
-      const _camRight = new THREE.Vector3(), _camFwd = new THREE.Vector3()
-      const _mp = { x: 0, y: 0, z: 0 }
-
-      // ── Focus animation ────────────────────────────────────────────────
-      let animating = false, animStartT = 0, animEndT = 0
-      let animStartLevel = 0, animEndLevel = 0
-      let animStartTime = 0, animDuration = 0
-      let animTransitLevel = 0 // lowest (most zoomed-out) level during flight
-      let animReturnLevel: number | null = null // queue return to default after arrival
-
-      function animateToT(targetT: number, targetLevel?: number) {
-        animating = true
-
-        animStartT = params.focusT
-        animEndT = targetT
-        animStartLevel = cameraLevel
-        animEndLevel = targetLevel ?? cameraLevel
-        animStartTime = performance.now()
-        animReturnLevel = null
-        zoomTarget = animEndLevel
-
-        const temporalDistYears = Math.abs(animEndT - animStartT) * TOTAL_YEARS
-        const levelDist = Math.abs(animEndLevel - animStartLevel)
-
-        // Duration: scale with log-distance + level change
-        if (temporalDistYears < 0.01) {
-          // Level-only change
-          animDuration = 400 + levelDist * 250
-        } else {
-          const logDist = Math.log10(Math.max(1, temporalDistYears))
-          animDuration = 600 + logDist * 500 + levelDist * 200
-        }
-        animDuration = Math.max(300, Math.min(2500, animDuration))
-
-        // Transit level: zoom out for long temporal jumps so the user sees the journey
-        const minLvl = Math.min(animStartLevel, animEndLevel)
-        if (temporalDistYears < 1) animTransitLevel = minLvl
-        else if (temporalDistYears < 50) animTransitLevel = Math.min(minLvl, 2)
-        else if (temporalDistYears < 500) animTransitLevel = Math.min(minLvl, 1)
-        else animTransitLevel = Math.min(minLvl, 0)
-      }
-
-      const animate = () => {
-        if (disposed) return
-        rafRef.current = requestAnimationFrame(animate)
-
-        // Smooth animation to target
-        if (animating) {
-          const elapsed = performance.now() - animStartTime
-          const progress = Math.min(elapsed / animDuration, 1)
-          // Cubic ease-in-out
-          const ease = progress < 0.5
-            ? 4 * progress * progress * progress
-            : 1 - Math.pow(-2 * progress + 2, 3) / 2
-
-          params.focusT = animStartT + (animEndT - animStartT) * ease
-
-          // Level: interpolate start→end with a zoom-out hump for long journeys
-          const baseLvl = animStartLevel + (animEndLevel - animStartLevel) * ease
-          const zoomOut = Math.min(animStartLevel, animEndLevel) - animTransitLevel
-          cameraLevel = baseLvl - zoomOut * Math.sin(progress * Math.PI)
-
-          updateFocus(rt)
-
-          updateLevelHighlight()
-          updatePlayBtn()
-          if (progress >= 1) {
-            animating = false
-
-            zoomTarget = cameraLevel
-            if (animReturnLevel !== null) {
-              const retLvl = animReturnLevel
-              animReturnLevel = null
-              animateToT(params.focusT, retLvl)
-            }
-          }
-        }
-
-        if (dragging && dragDisplacement !== 0) {
-          animating = false; playing = false; updatePlayBtn()
-          const totals = getCachedTotals()
-          const panLvl = Math.min(Math.round(cameraLevel), totals.length - 1)
-          params.focusT = THREE.MathUtils.clamp(params.focusT - dragDisplacement * params.panSpeed / totals[panLvl], 0, 1)
-          updateFocus(rt)
-        } else if (!dragging && Math.abs(panInertia) > 0.0001) {
-          const totals = getCachedTotals()
-          const panLvl = Math.min(Math.round(cameraLevel), totals.length - 1)
-          params.focusT = THREE.MathUtils.clamp(params.focusT - panInertia * params.panSpeed / totals[panLvl], 0, 1)
-          panInertia *= 0.92
-          updateFocus(rt)
-        }
-
-        // Smooth scroll zoom: lerp cameraLevel toward zoomTarget
-        if (!animating) {
-          const diff = zoomTarget - cameraLevel
-          if (Math.abs(diff) > 0.001) {
-            cameraLevel += diff * 0.12
-            updateFocus(rt)
-            updateLevelHighlight()
-            updatePlayBtn()
-          }
-        }
-
-        // Playback: advance focusT by speed * dt
-        if (playing && !animating && !dragging) {
-          const totalSeconds = TOTAL_YEARS * 365.25 * 24 * 3600
-          const lvl = Math.min(Math.round(cameraLevel), LEVEL_SPEEDS.length - 1)
-          const dt = LEVEL_SPEEDS[lvl].value * speedMult / 60 / totalSeconds // per frame at ~60fps
-          params.focusT = THREE.MathUtils.clamp(params.focusT + dt, 0, 1)
-          updateFocus(rt)
-          updatePlayBtn()
-        }
-
-        rt.controls.update()
-
-        // Update current time display
-        timeValue.textContent = focusTToDate(params.focusT)
-
-        rt.camera.getWorldDirection(_camFwd)
-        _camRight.crossVectors(_camFwd, rt.camera.up).normalize()
-
-        const totals = getCachedTotals(), hc = getHelixConsts()
-        const sw = window.innerWidth, sh = window.innerHeight
-        // Reset label pool
-        poolIdx = 0
-        for (const d of labelPool) { d.style.display = 'none'; d.style.transform = 'translateY(-100%)'; d.style.textAlign = 'left'; d.style.fontWeight = 'normal'; d.style.pointerEvents = 'none'; d.style.cursor = 'default'; d.dataset.eventT = ''; d.dataset.eventLevel = '' }
-
-        const focusYear = START_YEAR + params.focusT * TOTAL_YEARS
-        const camLvl = Math.round(cameraLevel)
-        let markerIdx = 0
-
-        // ── Events (always write line segments; collect labels for de-overlap) ─
-        const eventLabels: { scrX: number; scrY: number; coilX: number; coilY: number; opacity: number; ev: CoilEvent; anchorY: number; right: boolean }[] = []
-        for (let i = 0; i < events.length; i++) {
-          const ev = events[i]
-          const evYear = START_YEAR + ev.t * TOTAL_YEARS
-          const evWindow = eventWindowYears(ev.level)
-          const temporalDist = Math.abs(evYear - focusYear)
-          if (evWindow !== Infinity && temporalDist > evWindow) continue
-          if (markerIdx >= MAX_MARKERS) break
-
-          evalCoil(ev.t, ev.level, totals, params.offsets, hc.R, hc.L, hc.omega, hc.tMag, _mp)
-          const sx = _mp.x - origin.x, sy = _mp.y - origin.y, sz = _mp.z - origin.z
-
-          const fadeStart = evWindow === Infinity ? Infinity : evWindow * 0.7
-          const opacity = evWindow === Infinity ? 1.0
-            : temporalDist < fadeStart ? 1.0
-            : 1.0 - (temporalDist - fadeStart) / (evWindow - fadeStart)
-
-          // Project coil point
-          _projVec.set(sx, sy, sz).project(rt.camera)
-          if (_projVec.z > 1) continue
-          const coilX = (_projVec.x * 0.5 + 0.5) * sw
-          const coilY = (-_projVec.y * 0.5 + 0.5) * sh
-          if (coilX < -200 || coilX > sw + 200 || coilY < -50 || coilY > sh + 50) continue
-
-          // Project label anchor (offset from coil)
-          const labelOff = viewDistForLevel(cameraLevel) * 0.08
-          const side = ev.level >= 3 ? 1 : -1
-          const ex = sx + side * labelOff * _camRight.x, ey = sy + side * labelOff * _camRight.y, ez = sz + side * labelOff * _camRight.z
-          _projVec.set(ex, ey, ez).project(rt.camera)
-          const scrX = (_projVec.x * 0.5 + 0.5) * sw
-          const scrY = (-_projVec.y * 0.5 + 0.5) * sh
-
-          eventLabels.push({ scrX, scrY, coilX, coilY, opacity, ev, anchorY: scrY, right: ev.level >= 3 })
-        }
-
-        // De-overlap: sort by screen Y, push overlapping labels downward
-        eventLabels.sort((a, b) => a.scrY - b.scrY)
-        const MIN_GAP = 16
-        for (let i = 1; i < eventLabels.length; i++) {
-          const prev = eventLabels[i - 1], cur = eventLabels[i]
-          if (Math.abs(cur.scrX - prev.scrX) > 200) continue
-          if (cur.scrY - prev.scrY < MIN_GAP) {
-            cur.scrY = prev.scrY + MIN_GAP
-          }
-        }
-
-        // Assign to pool
-        for (const lbl of eventLabels) {
-          if (poolIdx >= POOL_SIZE) break
-          const div = labelPool[poolIdx++]
-          const dateStr = dateMode === 'relative' ? relativeDateStr(lbl.ev.t, params.focusT) : eventDateStr(lbl.ev.t)
-          const c = new THREE.Color(lbl.ev.color).lerp(new THREE.Color(1, 1, 1), 0.4)
-          div.innerHTML = `${lbl.ev.name} <span style="color:${c.getStyle()}">${dateStr}</span>`
-          div.style.display = 'block'
-          div.style.left = `${lbl.scrX}px`
-          div.style.top = `${lbl.scrY}px`
-          div.style.fontSize = '14px'
-          div.style.opacity = String(Math.max(0.3, lbl.opacity))
-          div.style.color = lbl.ev.color
-          div.style.fontWeight = 'bold'
-          div.style.textAlign = lbl.right ? 'left' : 'right'
-          div.style.transform = lbl.right ? 'translateY(-100%)' : 'translate(-100%, -100%)'
-          div.style.pointerEvents = 'auto'
-          div.style.cursor = 'pointer'
-          div.dataset.eventT = String(lbl.ev.t)
-          div.dataset.eventLevel = String(lbl.ev.level)
-        }
-
-        // ── Event connectors (dots on coil + lines to labels) ─────────────
-        {
-          const dpr = devicePixelRatio
-          const cw = Math.floor(sw * dpr), ch = Math.floor(sh * dpr)
-          if (connCanvas.width !== cw || connCanvas.height !== ch) {
-            connCanvas.width = cw; connCanvas.height = ch
-          }
-          const ctx = connCanvas.getContext('2d')!
-          ctx.clearRect(0, 0, cw, ch)
-          for (const lbl of eventLabels) {
-            if (lbl.opacity < 0.05) continue
-            const cx = lbl.coilX * dpr, cy = lbl.coilY * dpr
-            const lx = lbl.scrX * dpr, ly = lbl.scrY * dpr
-            ctx.globalAlpha = Math.max(0.3, lbl.opacity) * 0.5
-            // Connector line
-            ctx.strokeStyle = lbl.ev.color
-            ctx.lineWidth = 1 * dpr
-            ctx.beginPath(); ctx.moveTo(cx, cy); ctx.lineTo(lx, ly); ctx.stroke()
-            // Dot on coil
-            ctx.fillStyle = lbl.ev.color
-            ctx.globalAlpha = Math.max(0.3, lbl.opacity)
-            ctx.beginPath(); ctx.arc(cx, cy, 3 * dpr, 0, Math.PI * 2); ctx.fill()
-          }
-          ctx.globalAlpha = 1
-        }
-
-        // ── Focus indicator ────────────────────────────────────────────────
-        {
-          // Use _pos from cameraFrame (already interpolated for fractional levels)
-          cameraFrame(params.focusT)
-          const fx = _pos.x - origin.x, fy = _pos.y - origin.y, fz = _pos.z - origin.z
-          // Project coil point, then offset right in screen space
-          _projVec.set(fx, fy, fz).project(rt.camera)
-          const fScrX = (_projVec.x * 0.5 + 0.5) * sw + 20
-          const fScrY = (-_projVec.y * 0.5 + 0.5) * sh
-          if (chevronX < 0) { chevronX = fScrX; chevronY = fScrY }
-          chevronX += (fScrX - chevronX) * 0.15
-          chevronY += (fScrY - chevronY) * 0.15
-          focusChevron.style.left = `${chevronX}px`
-          focusChevron.style.top = `${chevronY}px`
-          const labelY = Math.max(20, Math.min(sh - 20, fScrY))
-          focusLabelDiv.textContent = focusTToDate(params.focusT)
-          focusLabelDiv.style.top = `${labelY}px`
-        }
-
-        markerGeom.setDrawRange(0, markerIdx * 2)
-        markerPosAttr.needsUpdate = true
-        markerColAttr.needsUpdate = true
-
-        updateMinimap()
-        rt.renderer.render(rt.scene, rt.camera)
-      }
-      rafRef.current = requestAnimationFrame(animate)
     }
 
-    init()
-    const handleResize = () => {
-      const rt = runtimeRef.current; if (!rt) return
-      rt.renderer.setSize(window.innerWidth, window.innerHeight, false)
-      rt.camera.aspect = window.innerWidth / window.innerHeight
-      rt.camera.updateProjectionMatrix()
+    function resize() {
+      const width = window.innerWidth
+      const height = window.innerHeight
+      camera.aspect = width / height
+      camera.updateProjectionMatrix()
+      renderer.setSize(width, height, false)
     }
-    window.addEventListener('resize', handleResize)
+
+    function animate() {
+      if (disposed) return
+      animationId = window.requestAnimationFrame(animate)
+      const now = performance.now() / 1000
+      const dt = 1 / 60
+
+      updateClock(now)
+      updateSmoke(now)
+      updateOrbitVisibility(storyRef.current)
+      updateCamera(now)
+      updateRemoteAvatars()
+      updateBarf(dt)
+
+      if (socket?.readyState === WebSocket.OPEN && now - lastStateSend > 0.18) {
+        const state = storyRef.current
+        const boarded = state.stage === 'ride' || state.stage === 'riders' || (state.stage === 'planets' && state.hasBag)
+        const position = boarded ? seatWorld : getLocalStagePosition(state)
+        socket.send(JSON.stringify({
+          type: 'state',
+          position: [Number(position.x.toFixed(2)), Number(position.y.toFixed(2)), Number(position.z.toFixed(2))],
+          yaw: Number(camera.rotation.y.toFixed(3)),
+          boarded,
+          stage: state.stage,
+        }))
+        lastStateSend = now
+      }
+
+      renderer.render(scene, camera)
+    }
+
+    window.addEventListener('resize', resize)
+    window.addEventListener('keydown', handleKey)
+    connectSocket()
+    void loadSpaceData()
+    const refreshTimer = window.setInterval(() => {
+      void loadSpaceData()
+    }, 15 * 60 * 1000)
+    animate()
+
     return () => {
-      disposed = true; window.removeEventListener('resize', handleResize); if (onSpaceKey) window.removeEventListener('keydown', onSpaceKey)
-      cancelAnimationFrame(rafRef.current)
-      const rt = runtimeRef.current
-      if (rt) { rt.pane.dispose(); rt.controls.dispose(); disposeLevels(rt); rt.renderer.dispose(); runtimeRef.current = null }
-      // Clean up DOM labels
-      while (overlay.firstChild) overlay.removeChild(overlay.firstChild)
+      disposed = true
+      window.cancelAnimationFrame(animationId)
+      window.removeEventListener('resize', resize)
+      window.removeEventListener('keydown', handleKey)
+      window.clearInterval(refreshTimer)
+      socket?.close()
+      disposeScene(scene)
+      renderer.dispose()
     }
   }, [])
 
   return (
-    <>
-      <canvas ref={canvasRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%' }} />
-      <div ref={overlayRef} style={{ position: 'absolute', top: 0, left: 0, width: '100%', height: '100%', pointerEvents: 'none', overflow: 'hidden' }} />
-    </>
+    <div style={{ width: '100%', height: '100%', position: 'relative', background: '#000' }}>
+      <canvas
+        ref={canvasRef}
+        style={{
+          width: '100%',
+          height: '100%',
+          display: 'block',
+          imageRendering: 'pixelated',
+          cursor: 'crosshair',
+        }}
+      />
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          pointerEvents: 'none',
+          color: '#42ff6b',
+          fontFamily: '"Courier New", monospace',
+          display: 'flex',
+          flexDirection: 'column',
+          justifyContent: 'space-between',
+          padding: '18px',
+          textTransform: 'uppercase',
+          letterSpacing: '0.08em',
+        }}
+      >
+        <div style={{ maxWidth: 760 }}>
+          <div style={{ fontSize: 16, opacity: 0.9 }}>Clock Store</div>
+          <div style={{ fontSize: 28, lineHeight: 1.2, marginTop: 10 }}>{stageCard.copy}</div>
+          <div style={{ fontSize: 13, opacity: 0.82, marginTop: 10 }}>{aside}</div>
+          <div style={{ fontSize: 12, opacity: 0.65, marginTop: 8 }}>
+            {spaceReady ? spaceNote : `The live sky is still drawing itself in. ${spaceNote}`}
+          </div>
+        </div>
+
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-end', gap: 16, flexWrap: 'wrap' }}>
+          <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', pointerEvents: 'auto' }}>
+            {[1, 2, 3].map((index) => (
+              <button
+                key={index}
+                onClick={() => choose(index as 1 | 2 | 3)}
+                style={{
+                  minWidth: 220,
+                  border: '1px solid #42ff6b',
+                  background: 'rgba(0,0,0,0.9)',
+                  color: '#42ff6b',
+                  padding: '14px 16px',
+                  textAlign: 'left',
+                  fontFamily: '"Courier New", monospace',
+                  fontSize: 15,
+                  textTransform: 'uppercase',
+                  letterSpacing: '0.08em',
+                  cursor: 'pointer',
+                }}
+              >
+                <div style={{ fontSize: 12, opacity: 0.75 }}>{index}</div>
+                <div style={{ marginTop: 6 }}>{stageCard.choices[index - 1]}</div>
+              </button>
+            ))}
+          </div>
+
+          <div style={{ maxWidth: 420, textAlign: 'right' }}>
+            <div style={{ fontSize: 14 }}>B: Barf</div>
+            <div style={{ fontSize: 12, opacity: 0.78, marginTop: 8 }}>{barfLine}</div>
+            <div style={{ fontSize: 12, opacity: 0.55, marginTop: 8 }}>{peers} rider{peers === 1 ? '' : 's'} in the wireframe mess</div>
+          </div>
+        </div>
+      </div>
+    </div>
   )
 }
